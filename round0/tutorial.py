@@ -156,7 +156,7 @@ class Trader:
         # Parameters for trading strategies
         self.timespan = 10  # How many historical price points to use
         self.make_width = 3.5  # Spread width for market making
-        self.take_width = 1  # How aggressive to be when taking orders
+        self.take_width = 0.5  # How aggressive to be when taking orders
 
     def calculate_fair_value(
         self, order_depth: OrderDepth, method="mid_price", min_vol=0
