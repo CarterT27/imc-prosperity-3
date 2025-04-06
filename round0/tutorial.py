@@ -155,7 +155,7 @@ class Trader:
         self.position_limits = {"KELP": 50, "RAINFOREST_RESIN": 50}
         # Parameters for trading strategies
         self.timespan = 10  # How many historical price points to use
-        self.make_width = 3.5  # Spread width for market making
+        self.make_width = 5.0  # Spread width for market making
         self.take_width = 0.5  # How aggressive to be when taking orders
 
     def calculate_fair_value(

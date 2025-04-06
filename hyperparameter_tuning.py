@@ -23,8 +23,8 @@ from pathlib import Path
 
 # Define the parameter ranges to test
 TIMESPAN_VALUES = [5, 10, 15, 20]
-MAKE_WIDTH_VALUES = [2.0, 3.0, 3.5, 4.0, 5.0]
-TAKE_WIDTH_VALUES = [0.5, 1.0, 1.5, 2.0]
+MAKE_WIDTH_VALUES = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
+TAKE_WIDTH_VALUES = [0.5, 1.0, 1.5]
 
 def modify_trading_params(original_file, temp_dir, timespan, make_width, take_width):
     """Creates a modified version of the trading file in the temp directory."""
