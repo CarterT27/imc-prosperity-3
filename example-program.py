@@ -1,10 +1,9 @@
-from typing import Dict, List
 from datamodel import OrderDepth, TradingState, Order
 
 
 class Trader:
 
-    def run(self, state: TradingState) -> Dict[str, List[Order]]:
+    def run(self, state: TradingState) -> dict[str, list[Order]]:
         """
         Only method required. It takes all buy and sell orders for all symbols as an input,
         and outputs a list of orders to be sent
@@ -56,13 +55,13 @@ class Trader:
 
                 # Add all the above the orders to the result dict
                 result[product] = orders
-                
+
         traderData = "SAMPLE" # String value holding Trader state data required. It will be delivered as TradingState.traderData on next execution.
-        
-        conversions = 1 
+
+        conversions = 1
 
                 # Return the dict of orders
                 # These possibly contain buy or sell orders
                 # Depending on the logic above
-        
+
         return result, conversions, traderData
