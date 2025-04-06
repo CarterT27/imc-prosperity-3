@@ -1,6 +1,6 @@
+prosperity3bt
 pandas
 numpy
 statistics
-math
 typing
 jsonpickle
