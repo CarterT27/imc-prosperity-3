@@ -154,11 +154,18 @@ class Trader:
         self.resin_vwap = []
         self.squid_ink_vwap = []
         
+        # Trading toggles for each product
+        self.active_products = {
+            "KELP": False,
+            "RAINFOREST_RESIN": True,
+            "SQUID_INK": False
+        }
+        
         # Position limits for each product - more conservative for volatile products
         self.position_limits = {
-            "KELP": 30,  # Reduced due to high volatility
+            "KELP": 50,  # Reduced due to high volatility
             "RAINFOREST_RESIN": 50,  # Stable product, can handle larger positions
-            "SQUID_INK": 40  # Medium position limit due to predictable patterns
+            "SQUID_INK": 50  # Medium position limit due to predictable patterns
         }
         
         # Parameters for trading strategies
@@ -414,6 +421,31 @@ class Trader:
 
         return orders
 
+    def close_position(self, product: str, order_depth: OrderDepth, position: int) -> list[Order]:
+        """
+        Attempt to close an existing position for an inactive product.
+        Uses market orders to close the position quickly.
+        """
+        orders = []
+        
+        if position == 0:
+            return orders
+        
+        if position > 0:  # We need to sell
+            if len(order_depth.buy_orders) > 0:
+                best_bid = max(order_depth.buy_orders.keys())
+                sell_quantity = min(position, order_depth.buy_orders[best_bid])
+                if sell_quantity > 0:
+                    orders.append(Order(product, best_bid, -sell_quantity))
+        else:  # We need to buy
+            if len(order_depth.sell_orders) > 0:
+                best_ask = min(order_depth.sell_orders.keys())
+                buy_quantity = min(-position, -order_depth.sell_orders[best_ask])
+                if buy_quantity > 0:
+                    orders.append(Order(product, best_ask, buy_quantity))
+        
+        return orders
+
     def run(self, state: TradingState) -> tuple[dict[str, list[Order]], int, str]:
         """
         Main method required by the competition.
@@ -441,33 +473,20 @@ class Trader:
             except:
                 logger.print("Could not parse trader data")
 
-        # Process KELP if available
-        if "KELP" in state.order_depths:
-            kelp_position = state.position.get("KELP", 0)
-            kelp_orders = self.product_orders(
-                "KELP", state.order_depths["KELP"], kelp_position
-            )
-            result["KELP"] = kelp_orders
-
-        # Process RAINFOREST_RESIN if available
-        if "RAINFOREST_RESIN" in state.order_depths:
-            resin_position = state.position.get("RAINFOREST_RESIN", 0)
-            resin_orders = self.product_orders(
-                "RAINFOREST_RESIN",
-                state.order_depths["RAINFOREST_RESIN"],
-                resin_position,
-            )
-            result["RAINFOREST_RESIN"] = resin_orders
-
-        # Process SQUID_INK if available
-        if "SQUID_INK" in state.order_depths:
-            squid_ink_position = state.position.get("SQUID_INK", 0)
-            squid_ink_orders = self.product_orders(
-                "SQUID_INK",
-                state.order_depths["SQUID_INK"],
-                squid_ink_position,
-            )
-            result["SQUID_INK"] = squid_ink_orders
+        # Process each product only if it's active
+        for product in state.order_depths.keys():
+            if product in self.active_products and self.active_products[product]:
+                position = state.position.get(product, 0)
+                orders = self.product_orders(product, state.order_depths[product], position)
+                if orders:  # Only add to result if we have orders
+                    result[product] = orders
+            else:
+                # For inactive products, if we have a position, try to close it
+                position = state.position.get(product, 0)
+                if position != 0:
+                    orders = self.close_position(product, state.order_depths[product], position)
+                    if orders:
+                        result[product] = orders
 
         # Save state for next iteration
         trader_data = {
