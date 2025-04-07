@@ -154,12 +154,12 @@ class Trader:
         self.resin_vwap = []
         self.squid_ink_vwap = []
         # Position limits for each product
-        self.position_limits = {"KELP": 50, "RAINFOREST_RESIN": 50, "Squid Ink": 50}
+        self.position_limits = {"KELP": 50, "RAINFOREST_RESIN": 50, "SQUID_INK": 50}
         # Parameters for trading strategies
         self.timespan = 10  # How many historical price points to use
         self.make_width = 5.0  # Spread width for market making
         self.take_width = 0.5  # How aggressive to be when taking orders
-        # Squid Ink specific parameters
+        # SQUID_INK specific parameters
         self.squid_ink_volatility_threshold = 2.0  # Threshold for detecting high volatility
         self.squid_ink_momentum_period = 5  # Period for momentum calculation
 
@@ -342,7 +342,7 @@ class Trader:
             # Set take width for RAINFOREST_RESIN
             take_width = self.take_width
                 
-        elif product == "Squid Ink":
+        elif product == "SQUID_INK":
             # Update price history
             self.squid_ink_prices.append(mm_mid_price)
             if len(self.squid_ink_prices) > self.timespan:
@@ -397,7 +397,7 @@ class Trader:
             if volatility > self.squid_ink_volatility_threshold:
                 # High volatility - be more conservative
                 take_width = self.take_width * 1.5
-                logger.print(f"High volatility detected for Squid Ink: {volatility:.2f}")
+                logger.print(f"High volatility detected for SQUID_INK: {volatility:.2f}")
         else:
             # Default case for any other product
             fair_value = mm_mid_price
@@ -510,15 +510,15 @@ class Trader:
             )
             result["RAINFOREST_RESIN"] = resin_orders
             
-        # Process Squid Ink if available
-        if "Squid Ink" in state.order_depths:
-            squid_ink_position = state.position.get("Squid Ink", 0)
+        # Process SQUID_INK if available
+        if "SQUID_INK" in state.order_depths:
+            squid_ink_position = state.position.get("SQUID_INK", 0)
             squid_ink_orders = self.product_orders(
-                "Squid Ink",
-                state.order_depths["Squid Ink"],
+                "SQUID_INK",
+                state.order_depths["SQUID_INK"],
                 squid_ink_position,
             )
-            result["Squid Ink"] = squid_ink_orders
+            result["SQUID_INK"] = squid_ink_orders
 
         # Save state for next iteration
         trader_data = {
