@@ -153,17 +153,31 @@ class Trader:
         self.kelp_vwap = []
         self.resin_vwap = []
         self.squid_ink_vwap = []
-        # Position limits for each product
-        self.position_limits = {"KELP": 50, "RAINFOREST_RESIN": 50, "SQUID_INK": 50}
+        
+        # Position limits for each product - more conservative for volatile products
+        self.position_limits = {
+            "KELP": 30,  # Reduced due to high volatility
+            "RAINFOREST_RESIN": 50,  # Stable product, can handle larger positions
+            "SQUID_INK": 40  # Medium position limit due to predictable patterns
+        }
+        
         # Parameters for trading strategies
-        self.timespan = 10  # How many historical price points to use
-        self.make_width = 5.0  # Spread width for market making
-        self.take_width = 0.5  # How aggressive to be when taking orders
+        self.timespan = 20  # Increased history for better pattern detection
+        self.make_width = {
+            "KELP": 8.0,  # Wider spread due to volatility
+            "RAINFOREST_RESIN": 3.0,  # Tighter spread due to stability
+            "SQUID_INK": 5.0  # Medium spread
+        }
+        self.take_width = {
+            "KELP": 1.0,  # More aggressive for volatile market
+            "RAINFOREST_RESIN": 0.3,  # Conservative taking strategy
+            "SQUID_INK": 0.7  # Balanced approach
+        }
+        
         # SQUID_INK specific parameters
-        self.squid_ink_volatility_threshold = (
-            2.0  # Threshold for detecting high volatility
-        )
-        self.squid_ink_momentum_period = 5  # Period for momentum calculation
+        self.squid_ink_volatility_threshold = 2.0
+        self.squid_ink_momentum_period = 10  # Increased for better pattern detection
+        self.squid_ink_pattern_length = 20  # New parameter for pattern detection
 
     def calculate_fair_value(
         self, order_depth: OrderDepth, method="mid_price", min_vol=0
@@ -258,140 +272,98 @@ class Trader:
         best_bid = max(order_depth.buy_orders.keys())
 
         # Find market maker orders (orders with volume >= 15)
-        filtered_asks = [
-            price
-            for price in order_depth.sell_orders.keys()
-            if abs(order_depth.sell_orders[price]) >= 15
-        ]
-        filtered_bids = [
-            price
-            for price in order_depth.buy_orders.keys()
-            if abs(order_depth.buy_orders[price]) >= 15
-        ]
+        filtered_asks = [price for price in order_depth.sell_orders.keys() if abs(order_depth.sell_orders[price]) >= 15]
+        filtered_bids = [price for price in order_depth.buy_orders.keys() if abs(order_depth.buy_orders[price]) >= 15]
 
         mm_ask = min(filtered_asks) if filtered_asks else best_ask
         mm_bid = max(filtered_bids) if filtered_bids else best_bid
-
-        # Calculate mid price from market maker orders
         mm_mid_price = (mm_ask + mm_bid) / 2
 
-        # Update price history
         if product == "KELP":
+            # More dynamic strategy for volatile KELP
             self.kelp_prices.append(mm_mid_price)
             if len(self.kelp_prices) > self.timespan:
                 self.kelp_prices.pop(0)
 
-            # Calculate VWAP (Volume Weighted Average Price)
-            volume = (
-                -1 * order_depth.sell_orders[best_ask]
-                + order_depth.buy_orders[best_bid]
-            )
-            vwap = (
-                best_bid * (-1) * order_depth.sell_orders[best_ask]
-                + best_ask * order_depth.buy_orders[best_bid]
-            ) / volume
+            # Calculate short-term and long-term VWAP for trend detection
+            volume = -1 * order_depth.sell_orders[best_ask] + order_depth.buy_orders[best_bid]
+            vwap = (best_bid * (-1) * order_depth.sell_orders[best_ask] + best_ask * order_depth.buy_orders[best_bid]) / volume
 
             self.kelp_vwap.append({"vol": volume, "vwap": vwap})
             if len(self.kelp_vwap) > self.timespan:
                 self.kelp_vwap.pop(0)
 
-            # Use VWAP as fair value if we have enough data, otherwise use mid price
+            # Use recent VWAP for fair value calculation
             if len(self.kelp_vwap) > 0:
-                total_vol = sum([x["vol"] for x in self.kelp_vwap])
+                recent_vwaps = self.kelp_vwap[-5:]  # Focus on recent prices
+                total_vol = sum([x["vol"] for x in recent_vwaps])
                 if total_vol > 0:
-                    fair_value = (
-                        sum([x["vwap"] * x["vol"] for x in self.kelp_vwap]) / total_vol
-                    )
+                    fair_value = sum([x["vwap"] * x["vol"] for x in recent_vwaps]) / total_vol
                 else:
                     fair_value = mm_mid_price
             else:
                 fair_value = mm_mid_price
 
-            # Set take width for KELP
-            take_width = self.take_width
+            take_width = self.take_width["KELP"]
+            make_width = self.make_width["KELP"]
 
         elif product == "RAINFOREST_RESIN":
-            self.resin_prices.append(mm_mid_price)
-            if len(self.resin_prices) > self.timespan:
-                self.resin_prices.pop(0)
-
-            # Use fixed fair value of 10000 for RAINFOREST_RESIN
+            # Stable product - use fixed fair value with tight spreads
             fair_value = 10000
+            take_width = self.take_width["RAINFOREST_RESIN"]
+            make_width = self.make_width["RAINFOREST_RESIN"]
 
-            # Set take width for RAINFOREST_RESIN
-            take_width = self.take_width
+            # Only take orders if significantly off fair value
+            if abs(mm_mid_price - fair_value) > 5:
+                take_width = take_width * 2  # More aggressive taking when price deviates significantly
 
         elif product == "SQUID_INK":
-            # Update price history
             self.squid_ink_prices.append(mm_mid_price)
             if len(self.squid_ink_prices) > self.timespan:
                 self.squid_ink_prices.pop(0)
 
-            # Calculate VWAP
-            volume = (
-                -1 * order_depth.sell_orders[best_ask]
-                + order_depth.buy_orders[best_bid]
-            )
-            vwap = (
-                best_bid * (-1) * order_depth.sell_orders[best_ask]
-                + best_ask * order_depth.buy_orders[best_bid]
-            ) / volume
+            # Enhanced pattern detection
+            pattern_detected = False
+            if len(self.squid_ink_prices) >= self.squid_ink_pattern_length:
+                # Look for repeating patterns in price movements
+                recent_prices = self.squid_ink_prices[-self.squid_ink_pattern_length:]
+                price_changes = [recent_prices[i] - recent_prices[i-1] for i in range(1, len(recent_prices))]
+                
+                # Simple pattern detection: look for alternating positive/negative changes
+                alternating = True
+                for i in range(1, len(price_changes)):
+                    if (price_changes[i] > 0) == (price_changes[i-1] > 0):
+                        alternating = False
+                        break
+                pattern_detected = alternating
 
-            self.squid_ink_vwap.append({"vol": volume, "vwap": vwap})
-            if len(self.squid_ink_vwap) > self.timespan:
-                self.squid_ink_vwap.pop(0)
-
-            # Calculate momentum (rate of price change)
+            # Calculate momentum and volatility
             momentum = 0
             if len(self.squid_ink_prices) >= self.squid_ink_momentum_period:
-                momentum = (
-                    self.squid_ink_prices[-1]
-                    - self.squid_ink_prices[-self.squid_ink_momentum_period]
-                ) / self.squid_ink_momentum_period
+                momentum = (self.squid_ink_prices[-1] - self.squid_ink_prices[-self.squid_ink_momentum_period]) / self.squid_ink_momentum_period
 
-            # Calculate volatility
             volatility = 0
             if len(self.squid_ink_prices) >= 2:
-                volatility = statistics.stdev(
-                    self.squid_ink_prices[-min(10, len(self.squid_ink_prices)) :]
-                )
+                volatility = statistics.stdev(self.squid_ink_prices[-min(10, len(self.squid_ink_prices)):])
 
-            # Use VWAP as fair value if we have enough data, otherwise use mid price
-            if len(self.squid_ink_vwap) > 0:
-                total_vol = sum([x["vol"] for x in self.squid_ink_vwap])
-                if total_vol > 0:
-                    fair_value = (
-                        sum([x["vwap"] * x["vol"] for x in self.squid_ink_vwap])
-                        / total_vol
-                    )
-                else:
-                    fair_value = mm_mid_price
-            else:
-                fair_value = mm_mid_price
+            # Calculate fair value using pattern information
+            fair_value = mm_mid_price
+            if pattern_detected:
+                # If pattern detected, predict next move
+                last_change = self.squid_ink_prices[-1] - self.squid_ink_prices[-2]
+                fair_value = mm_mid_price - last_change  # Predict reversal
 
             # Adjust fair value based on momentum
-            if momentum > 0:
-                # Upward momentum - be more aggressive on buys
-                fair_value += momentum * 0.5
-            elif momentum < 0:
-                # Downward momentum - be more aggressive on sells
-                fair_value += momentum * 0.5
+            fair_value += momentum * (0.5 if not pattern_detected else 1.0)
 
-            # Adjust take width based on volatility
-            take_width = self.take_width
+            take_width = self.take_width["SQUID_INK"]
+            make_width = self.make_width["SQUID_INK"]
+            
             if volatility > self.squid_ink_volatility_threshold:
-                # High volatility - be more conservative
-                take_width = self.take_width * 1.5
-                logger.print(
-                    f"High volatility detected for SQUID_INK: {volatility:.2f}"
-                )
-        else:
-            # Default case for any other product
-            fair_value = mm_mid_price
-            take_width = self.take_width
+                take_width *= 1.5
+                make_width *= 1.5
 
         # Taking strategy: take favorable orders
-        # Buy if price below fair value minus take width
         if best_ask <= fair_value - take_width:
             ask_amount = -1 * order_depth.sell_orders[best_ask]
             if ask_amount <= 20:  # Only take small orders to avoid manipulation
@@ -400,7 +372,6 @@ class Trader:
                     orders.append(Order(product, best_ask, quantity))
                     buy_order_volume += quantity
 
-        # Sell if price above fair value plus take width
         if best_bid >= fair_value + take_width:
             bid_amount = order_depth.buy_orders[best_bid]
             if bid_amount <= 20:  # Only take small orders to avoid manipulation
@@ -422,21 +393,12 @@ class Trader:
             2,
         )
 
-        # Market making strategy: place limit orders
-        # Find prices just outside of existing ones
-        asks_above_fair = [
-            price for price in order_depth.sell_orders.keys() if price > fair_value + 1
-        ]
-        bids_below_fair = [
-            price for price in order_depth.buy_orders.keys() if price < fair_value - 1
-        ]
+        # Market making strategy with product-specific spreads
+        asks_above_fair = [price for price in order_depth.sell_orders.keys() if price > fair_value + 1]
+        bids_below_fair = [price for price in order_depth.buy_orders.keys() if price < fair_value - 1]
 
-        best_ask_above_fair = (
-            min(asks_above_fair) if asks_above_fair else int(fair_value) + 2
-        )
-        best_bid_below_fair = (
-            max(bids_below_fair) if bids_below_fair else int(fair_value) - 2
-        )
+        best_ask_above_fair = min(asks_above_fair) if asks_above_fair else int(fair_value + make_width)
+        best_bid_below_fair = max(bids_below_fair) if bids_below_fair else int(fair_value - make_width)
 
         # Place buy order
         buy_quantity = position_limit - (position + buy_order_volume)
