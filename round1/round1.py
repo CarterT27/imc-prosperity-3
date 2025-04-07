@@ -160,7 +160,9 @@ class Trader:
         self.make_width = 5.0  # Spread width for market making
         self.take_width = 0.5  # How aggressive to be when taking orders
         # SQUID_INK specific parameters
-        self.squid_ink_volatility_threshold = 2.0  # Threshold for detecting high volatility
+        self.squid_ink_volatility_threshold = (
+            2.0  # Threshold for detecting high volatility
+        )
         self.squid_ink_momentum_period = 5  # Period for momentum calculation
 
     def calculate_fair_value(
@@ -304,7 +306,7 @@ class Trader:
                     fair_value = mm_mid_price
             else:
                 fair_value = mm_mid_price
-                
+
             # Set take width for KELP
             take_width = self.take_width
 
@@ -313,41 +315,18 @@ class Trader:
             if len(self.resin_prices) > self.timespan:
                 self.resin_prices.pop(0)
 
-            # Calculate VWAP
-            volume = (
-                -1 * order_depth.sell_orders[best_ask]
-                + order_depth.buy_orders[best_bid]
-            )
-            vwap = (
-                best_bid * (-1) * order_depth.sell_orders[best_ask]
-                + best_ask * order_depth.buy_orders[best_bid]
-            ) / volume
+            # Use fixed fair value of 10000 for RAINFOREST_RESIN
+            fair_value = 10000
 
-            self.resin_vwap.append({"vol": volume, "vwap": vwap})
-            if len(self.resin_vwap) > self.timespan:
-                self.resin_vwap.pop(0)
-
-            # Use VWAP as fair value if we have enough data, otherwise use mid price
-            if len(self.resin_vwap) > 0:
-                total_vol = sum([x["vol"] for x in self.resin_vwap])
-                if total_vol > 0:
-                    fair_value = (
-                        sum([x["vwap"] * x["vol"] for x in self.resin_vwap]) / total_vol
-                    )
-                else:
-                    fair_value = mm_mid_price
-            else:
-                fair_value = mm_mid_price
-                
             # Set take width for RAINFOREST_RESIN
             take_width = self.take_width
-                
+
         elif product == "SQUID_INK":
             # Update price history
             self.squid_ink_prices.append(mm_mid_price)
             if len(self.squid_ink_prices) > self.timespan:
                 self.squid_ink_prices.pop(0)
-                
+
             # Calculate VWAP
             volume = (
                 -1 * order_depth.sell_orders[best_ask]
@@ -357,33 +336,39 @@ class Trader:
                 best_bid * (-1) * order_depth.sell_orders[best_ask]
                 + best_ask * order_depth.buy_orders[best_bid]
             ) / volume
-            
+
             self.squid_ink_vwap.append({"vol": volume, "vwap": vwap})
             if len(self.squid_ink_vwap) > self.timespan:
                 self.squid_ink_vwap.pop(0)
-                
+
             # Calculate momentum (rate of price change)
             momentum = 0
             if len(self.squid_ink_prices) >= self.squid_ink_momentum_period:
-                momentum = (self.squid_ink_prices[-1] - self.squid_ink_prices[-self.squid_ink_momentum_period]) / self.squid_ink_momentum_period
-                
+                momentum = (
+                    self.squid_ink_prices[-1]
+                    - self.squid_ink_prices[-self.squid_ink_momentum_period]
+                ) / self.squid_ink_momentum_period
+
             # Calculate volatility
             volatility = 0
             if len(self.squid_ink_prices) >= 2:
-                volatility = statistics.stdev(self.squid_ink_prices[-min(10, len(self.squid_ink_prices)):])
-                
+                volatility = statistics.stdev(
+                    self.squid_ink_prices[-min(10, len(self.squid_ink_prices)) :]
+                )
+
             # Use VWAP as fair value if we have enough data, otherwise use mid price
             if len(self.squid_ink_vwap) > 0:
                 total_vol = sum([x["vol"] for x in self.squid_ink_vwap])
                 if total_vol > 0:
                     fair_value = (
-                        sum([x["vwap"] * x["vol"] for x in self.squid_ink_vwap]) / total_vol
+                        sum([x["vwap"] * x["vol"] for x in self.squid_ink_vwap])
+                        / total_vol
                     )
                 else:
                     fair_value = mm_mid_price
             else:
                 fair_value = mm_mid_price
-                
+
             # Adjust fair value based on momentum
             if momentum > 0:
                 # Upward momentum - be more aggressive on buys
@@ -391,13 +376,15 @@ class Trader:
             elif momentum < 0:
                 # Downward momentum - be more aggressive on sells
                 fair_value += momentum * 0.5
-                
+
             # Adjust take width based on volatility
             take_width = self.take_width
             if volatility > self.squid_ink_volatility_threshold:
                 # High volatility - be more conservative
                 take_width = self.take_width * 1.5
-                logger.print(f"High volatility detected for SQUID_INK: {volatility:.2f}")
+                logger.print(
+                    f"High volatility detected for SQUID_INK: {volatility:.2f}"
+                )
         else:
             # Default case for any other product
             fair_value = mm_mid_price
@@ -509,7 +496,7 @@ class Trader:
                 resin_position,
             )
             result["RAINFOREST_RESIN"] = resin_orders
-            
+
         # Process SQUID_INK if available
         if "SQUID_INK" in state.order_depths:
             squid_ink_position = state.position.get("SQUID_INK", 0)
