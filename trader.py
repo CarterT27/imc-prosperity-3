@@ -156,9 +156,9 @@ class Trader:
         
         # Trading toggles for each product
         self.active_products = {
-            "KELP": False,
+            "KELP": True,
             "RAINFOREST_RESIN": True,
-            "SQUID_INK": False
+            "SQUID_INK": True
         }
         
         # Position limits for each product - more conservative for volatile products
@@ -292,24 +292,35 @@ class Trader:
             if len(self.kelp_prices) > self.timespan:
                 self.kelp_prices.pop(0)
 
-            # Calculate short-term and long-term VWAP for trend detection
-            volume = -1 * order_depth.sell_orders[best_ask] + order_depth.buy_orders[best_bid]
-            vwap = (best_bid * (-1) * order_depth.sell_orders[best_ask] + best_ask * order_depth.buy_orders[best_bid]) / volume
+            # Identify market maker orders (volume >= 15)
+            mm_asks = {price: volume for price, volume in order_depth.sell_orders.items() if abs(volume) >= 15}
+            mm_bids = {price: volume for price, volume in order_depth.buy_orders.items() if abs(volume) >= 15}
+            
+            # Calculate VWAP of market maker orders
+            if mm_asks and mm_bids:
+                total_volume = sum(abs(vol) for vol in mm_asks.values()) + sum(abs(vol) for vol in mm_bids.values())
+                mm_vwap = sum(price * abs(vol) for price, vol in mm_asks.items()) + sum(price * abs(vol) for price, vol in mm_bids.items())
+                mm_vwap /= total_volume
+                fair_value = mm_vwap
+            else:
+                # Fallback to previous method if no market maker orders detected
+                volume = -1 * order_depth.sell_orders[best_ask] + order_depth.buy_orders[best_bid]
+                vwap = (best_bid * (-1) * order_depth.sell_orders[best_ask] + best_ask * order_depth.buy_orders[best_bid]) / volume
 
-            self.kelp_vwap.append({"vol": volume, "vwap": vwap})
-            if len(self.kelp_vwap) > self.timespan:
-                self.kelp_vwap.pop(0)
+                self.kelp_vwap.append({"vol": volume, "vwap": vwap})
+                if len(self.kelp_vwap) > self.timespan:
+                    self.kelp_vwap.pop(0)
 
-            # Use recent VWAP for fair value calculation
-            if len(self.kelp_vwap) > 0:
-                recent_vwaps = self.kelp_vwap[-5:]  # Focus on recent prices
-                total_vol = sum([x["vol"] for x in recent_vwaps])
-                if total_vol > 0:
-                    fair_value = sum([x["vwap"] * x["vol"] for x in recent_vwaps]) / total_vol
+                # Use recent VWAP for fair value calculation
+                if len(self.kelp_vwap) > 0:
+                    recent_vwaps = self.kelp_vwap[-5:]  # Focus on recent prices
+                    total_vol = sum([x["vol"] for x in recent_vwaps])
+                    if total_vol > 0:
+                        fair_value = sum([x["vwap"] * x["vol"] for x in recent_vwaps]) / total_vol
+                    else:
+                        fair_value = mm_mid_price
                 else:
                     fair_value = mm_mid_price
-            else:
-                fair_value = mm_mid_price
 
             take_width = self.take_width["KELP"]
             make_width = self.make_width["KELP"]
