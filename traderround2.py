@@ -406,33 +406,6 @@ class Trader:
                 take_width *= 1.5
                 make_width *= 1.5
 
-        elif product == "PICNIC_BASKET1":
-            # Calculate fair value based on component products
-            croissant_price = self.calculate_fair_value(state.order_depths["CROISSANTS"])
-            jam_price = self.calculate_fair_value(state.order_depths["JAMS"])
-            djembe_price = self.calculate_fair_value(state.order_depths["DJEMBE"])
-            
-            if croissant_price is not None and jam_price is not None and djembe_price is not None:
-                fair_value = (6 * croissant_price) + (3 * jam_price) + (1 * djembe_price)
-            else:
-                return orders  # Skip if we can't calculate fair value
-            
-            take_width = 5.0  # Conservative taking for baskets
-            make_width = 10.0  # Wider spread for baskets
-            
-        elif product == "PICNIC_BASKET2":
-            # Calculate fair value based on component products
-            croissant_price = self.calculate_fair_value(state.order_depths["CROISSANTS"])
-            jam_price = self.calculate_fair_value(state.order_depths["JAMS"])
-            
-            if croissant_price is not None and jam_price is not None:
-                fair_value = (4 * croissant_price) + (2 * jam_price)
-            else:
-                return orders  # Skip if we can't calculate fair value
-            
-            take_width = 5.0  # Conservative taking for baskets
-            make_width = 10.0  # Wider spread for baskets
-
         # Taking strategy: take favorable orders
         if best_ask <= fair_value - take_width:
             ask_amount = -1 * order_depth.sell_orders[best_ask]
