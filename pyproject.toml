@@ -13,4 +13,5 @@ dependencies = [
     "prosperity3bt>=0.4.0",
     "scikit-learn>=1.6.1",
     "seaborn>=0.13.2",
+    "statsmodels>=0.14.4",
 ]
