@@ -176,7 +176,7 @@ class Trader:
         self.position_limits = {
             "KELP": 50,  # Reduced due to high volatility
             "RAINFOREST_RESIN": 50,  # Stable product, can handle larger positions
-            "SQUID_INK": 50,  # Medium position limit due to predictable patterns
+            "SQUID_INK": 50,  # Use full position limit for reversion trades
             "CROISSANTS": 250,  # New product with high limit
             "JAMS": 350,  # New product with high limit
             "DJEMBES": 60,  # Changed from DJEMBE to DJEMBES
@@ -204,9 +204,13 @@ class Trader:
         }
         
         # SQUID_INK specific parameters
-        self.squid_ink_volatility_threshold = 2.0
-        self.squid_ink_momentum_period = 10  # Increased for better pattern detection
-        self.squid_ink_pattern_length = 20  # New parameter for pattern detection
+        self.squid_ink_volatility_threshold = 3.0  # Increased threshold for taking positions
+        self.squid_ink_momentum_period = 10
+        self.squid_ink_mean_window = 30  # Window for calculating average price
+        self.squid_ink_deviation_threshold = 0.05  # 5% deviation from mean triggers trade
+        self.squid_ink_max_position_time = 5  # Maximum time to hold a position
+        self.squid_ink_position_start_time = 0  # Track when we entered a position
+        self.squid_ink_last_position = 0  # Track our last position for exit strategy
 
     def calculate_fair_value(
         self, order_depth: OrderDepth, method="mid_price", min_vol=0
@@ -283,11 +287,15 @@ class Trader:
         return buy_order_volume, sell_order_volume
 
     def product_orders(
-        self, product: str, order_depth: OrderDepth, position: int
+        self, product: str, order_depth: OrderDepth, position: int, state_timestamp: int = 0
     ) -> list[Order]:
         """Generate orders for a specific product."""
         orders = []
         position_limit = self.position_limits[product]
+        
+        # Use specialized strategy for SQUID_INK
+        if product == "SQUID_INK":
+            return self.squid_ink_strategy(order_depth, position, state_timestamp)
 
         buy_order_volume = 0
         sell_order_volume = 0
@@ -359,52 +367,6 @@ class Trader:
             # Only take orders if significantly off fair value
             if abs(mm_mid_price - fair_value) > 5:
                 take_width = take_width * 2  # More aggressive taking when price deviates significantly
-
-        elif product == "SQUID_INK":
-            self.squid_ink_prices.append(mm_mid_price)
-            if len(self.squid_ink_prices) > self.timespan:
-                self.squid_ink_prices.pop(0)
-
-            # Enhanced pattern detection
-            pattern_detected = False
-            if len(self.squid_ink_prices) >= self.squid_ink_pattern_length:
-                # Look for repeating patterns in price movements
-                recent_prices = self.squid_ink_prices[-self.squid_ink_pattern_length:]
-                price_changes = [recent_prices[i] - recent_prices[i-1] for i in range(1, len(recent_prices))]
-                
-                # Simple pattern detection: look for alternating positive/negative changes
-                alternating = True
-                for i in range(1, len(price_changes)):
-                    if (price_changes[i] > 0) == (price_changes[i-1] > 0):
-                        alternating = False
-                        break
-                pattern_detected = alternating
-
-            # Calculate momentum and volatility
-            momentum = 0
-            if len(self.squid_ink_prices) >= self.squid_ink_momentum_period:
-                momentum = (self.squid_ink_prices[-1] - self.squid_ink_prices[-self.squid_ink_momentum_period]) / self.squid_ink_momentum_period
-
-            volatility = 0
-            if len(self.squid_ink_prices) >= 2:
-                volatility = statistics.stdev(self.squid_ink_prices[-min(10, len(self.squid_ink_prices)):])
-
-            # Calculate fair value using pattern information
-            fair_value = mm_mid_price
-            if pattern_detected:
-                # If pattern detected, predict next move
-                last_change = self.squid_ink_prices[-1] - self.squid_ink_prices[-2]
-                fair_value = mm_mid_price - last_change  # Predict reversal
-
-            # Adjust fair value based on momentum
-            fair_value += momentum * (0.5 if not pattern_detected else 1.0)
-
-            take_width = self.take_width["SQUID_INK"]
-            make_width = self.make_width["SQUID_INK"]
-            
-            if volatility > self.squid_ink_volatility_threshold:
-                take_width *= 1.5
-                make_width *= 1.5
 
         # Taking strategy: take favorable orders
         if best_ask <= fair_value - take_width:
@@ -480,6 +442,94 @@ class Trader:
                 if buy_quantity > 0:
                     orders.append(Order(product, best_ask, buy_quantity))
         
+        return orders
+
+    def squid_ink_strategy(self, order_depth: OrderDepth, position: int, state_timestamp: int) -> list[Order]:
+        """
+        Special strategy for SQUID_INK focused on mean reversion during high volatility.
+        Avoids carrying positions during normal market conditions.
+        """
+        orders = []
+        position_limit = self.position_limits["SQUID_INK"]
+        
+        # Calculate current mid price
+        if len(order_depth.sell_orders) == 0 or len(order_depth.buy_orders) == 0:
+            return orders
+            
+        best_ask = min(order_depth.sell_orders.keys())
+        best_bid = max(order_depth.buy_orders.keys())
+        mid_price = (best_ask + best_bid) / 2
+        
+        # Update price history
+        self.squid_ink_prices.append(mid_price)
+        if len(self.squid_ink_prices) > max(self.timespan, self.squid_ink_mean_window):
+            self.squid_ink_prices.pop(0)
+            
+        # Not enough data to make decisions
+        if len(self.squid_ink_prices) < 10:
+            return orders
+            
+        # Calculate mean and volatility
+        recent_window = min(len(self.squid_ink_prices), self.squid_ink_mean_window)
+        mean_price = sum(self.squid_ink_prices[-recent_window:]) / recent_window
+        
+        # Calculate volatility (standard deviation of recent prices)
+        if len(self.squid_ink_prices) >= 2:
+            volatility = statistics.stdev(self.squid_ink_prices[-min(10, len(self.squid_ink_prices)):])
+        else:
+            volatility = 0
+            
+        # Calculate deviation from mean as a percentage
+        deviation_pct = abs(mid_price - mean_price) / mean_price if mean_price > 0 else 0
+        
+        # First priority: Close existing position if we've held it too long
+        if position != 0 and self.squid_ink_position_start_time > 0:
+            time_in_position = state_timestamp - self.squid_ink_position_start_time
+            if time_in_position >= self.squid_ink_max_position_time:
+                return self.close_position("SQUID_INK", order_depth, position)
+                
+        # If we have no position, look for new mean reversion opportunities
+        if position == 0:
+            # Only take positions during high volatility AND significant deviation from mean
+            if volatility > self.squid_ink_volatility_threshold and deviation_pct > self.squid_ink_deviation_threshold:
+                # Price is significantly above mean - take a short position
+                if mid_price > mean_price:
+                    # Market is overpriced - sell at the bid
+                    quantity = min(order_depth.buy_orders[best_bid], position_limit)
+                    if quantity > 0:
+                        orders.append(Order("SQUID_INK", best_bid, -quantity))
+                        self.squid_ink_position_start_time = state_timestamp
+                        self.squid_ink_last_position = -quantity
+                # Price is significantly below mean - take a long position
+                elif mid_price < mean_price:
+                    # Market is underpriced - buy at the ask
+                    quantity = min(-order_depth.sell_orders[best_ask], position_limit)
+                    if quantity > 0:
+                        orders.append(Order("SQUID_INK", best_ask, quantity))
+                        self.squid_ink_position_start_time = state_timestamp
+                        self.squid_ink_last_position = quantity
+        # If we have a position, look for exit opportunities
+        else:
+            # Exit when price moves back toward mean
+            if position > 0:  # We're long
+                if mid_price >= mean_price:  # Price has reverted upward
+                    # Sell our position at the bid
+                    quantity = min(position, order_depth.buy_orders[best_bid])
+                    if quantity > 0:
+                        orders.append(Order("SQUID_INK", best_bid, -quantity))
+                        if quantity == position:  # Full exit
+                            self.squid_ink_position_start_time = 0
+                            self.squid_ink_last_position = 0
+            else:  # We're short
+                if mid_price <= mean_price:  # Price has reverted downward
+                    # Buy back our position at the ask
+                    quantity = min(-position, -order_depth.sell_orders[best_ask])
+                    if quantity > 0:
+                        orders.append(Order("SQUID_INK", best_ask, quantity))
+                        if quantity == -position:  # Full exit
+                            self.squid_ink_position_start_time = 0
+                            self.squid_ink_last_position = 0
+                            
         return orders
 
     def calculate_synthetic_value(self, state: TradingState, basket_type: str) -> float:
@@ -857,7 +907,7 @@ class Trader:
                         
             elif product in self.active_products and self.active_products[product]:
                 position = state.position.get(product, 0)
-                orders = self.product_orders(product, state.order_depths[product], position)
+                orders = self.product_orders(product, state.order_depths[product], position, state.timestamp)
                 if orders:
                     result[product] = orders
             else:
