@@ -190,17 +190,17 @@ class Trader:
             "KELP": 8.0,  # Wider spread due to volatility
             "RAINFOREST_RESIN": 3.0,  # Tighter spread due to stability
             "SQUID_INK": 5.0,  # Medium spread
-            "CROISSANTS": 8.0,  # Using KELP-like strategy
-            "JAMS": 8.0,  # Using KELP-like strategy
-            "DJEMBES": 8.0  # Changed from DJEMBE to DJEMBES
+            "CROISSANTS": 1.0,  # Using KELP-like strategy
+            "JAMS": 2.0,  # Using KELP-like strategy
+            "DJEMBES": 2.0  # Changed from DJEMBE to DJEMBES
         }
         self.take_width = {
             "KELP": 1.0,  # More aggressive for volatile market
             "RAINFOREST_RESIN": 0.3,  # Conservative taking strategy
             "SQUID_INK": 0.7,  # Balanced approach
-            "CROISSANTS": 1.0,  # Using KELP-like strategy
-            "JAMS": 1.0,  # Using KELP-like strategy
-            "DJEMBES": 1.0  # Changed from DJEMBE to DJEMBES
+            "CROISSANTS": 0.5,  # Using KELP-like strategy
+            "JAMS": 0.5,  # Using KELP-like strategy
+            "DJEMBES": 0.5  # Changed from DJEMBE to DJEMBES
         }
         
         # SQUID_INK specific parameters
