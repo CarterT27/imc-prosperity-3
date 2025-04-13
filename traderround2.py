@@ -152,13 +152,13 @@ class Trader:
         self.squid_ink_prices = []
         self.croissants_prices = []
         self.jams_prices = []
-        self.djembe_prices = []
+        self.djembes_prices = []
         self.kelp_vwap = []
         self.resin_vwap = []
         self.squid_ink_vwap = []
         self.croissants_vwap = []
         self.jams_vwap = []
-        self.djembe_vwap = []
+        self.djembes_vwap = []
         
         # Trading toggles for each product
         self.active_products = {
@@ -167,9 +167,9 @@ class Trader:
             "SQUID_INK": True,
             "CROISSANTS": True,
             "JAMS": True,
-            "DJEMBE": True,
-            "PICNIC_BASKET1": False,  # We'll handle these separately
-            "PICNIC_BASKET2": False   # We'll handle these separately
+            "DJEMBES": True,
+            "PICNIC_BASKET1": True,  # Now active
+            "PICNIC_BASKET2": True   # Now active
         }
         
         # Position limits for each product - more conservative for volatile products
@@ -179,7 +179,7 @@ class Trader:
             "SQUID_INK": 50,  # Medium position limit due to predictable patterns
             "CROISSANTS": 250,  # New product with high limit
             "JAMS": 350,  # New product with high limit
-            "DJEMBE": 60,  # New product with medium limit
+            "DJEMBES": 60,  # Changed from DJEMBE to DJEMBES
             "PICNIC_BASKET1": 60,  # Will handle separately
             "PICNIC_BASKET2": 100   # Will handle separately
         }
@@ -192,7 +192,7 @@ class Trader:
             "SQUID_INK": 5.0,  # Medium spread
             "CROISSANTS": 8.0,  # Using KELP-like strategy
             "JAMS": 8.0,  # Using KELP-like strategy
-            "DJEMBE": 8.0  # Using KELP-like strategy
+            "DJEMBES": 8.0  # Changed from DJEMBE to DJEMBES
         }
         self.take_width = {
             "KELP": 1.0,  # More aggressive for volatile market
@@ -200,7 +200,7 @@ class Trader:
             "SQUID_INK": 0.7,  # Balanced approach
             "CROISSANTS": 1.0,  # Using KELP-like strategy
             "JAMS": 1.0,  # Using KELP-like strategy
-            "DJEMBE": 1.0  # Using KELP-like strategy
+            "DJEMBES": 1.0  # Changed from DJEMBE to DJEMBES
         }
         
         # SQUID_INK specific parameters
@@ -308,7 +308,7 @@ class Trader:
         mm_bid = max(filtered_bids) if filtered_bids else best_bid
         mm_mid_price = (mm_ask + mm_bid) / 2
 
-        if product in ["KELP", "CROISSANTS", "JAMS", "DJEMBE"]:
+        if product in ["KELP", "CROISSANTS", "JAMS", "DJEMBES"]:
             # More dynamic strategy for volatile products
             price_history = getattr(self, f"{product.lower()}_prices")
             vwap_history = getattr(self, f"{product.lower()}_vwap")
@@ -316,7 +316,7 @@ class Trader:
             price_history.append(mm_mid_price)
             if len(price_history) > self.timespan:
                 price_history.pop(0)
-
+            
             # Identify market maker orders (volume >= 15)
             mm_asks = {price: volume for price, volume in order_depth.sell_orders.items() if abs(volume) >= 15}
             mm_bids = {price: volume for price, volume in order_depth.buy_orders.items() if abs(volume) >= 15}
@@ -482,6 +482,152 @@ class Trader:
         
         return orders
 
+    def calculate_synthetic_value(self, state: TradingState, basket_type: str) -> float:
+        """Calculate synthetic value of picnic basket based on component prices."""
+        if basket_type == "PICNIC_BASKET1":
+            # 6 CROISSANTS + 3 JAMS + 1 DJEMBES
+            croissant_price = self.calculate_fair_value(state.order_depths["CROISSANTS"])
+            jams_price = self.calculate_fair_value(state.order_depths["JAMS"])
+            djembes_price = self.calculate_fair_value(state.order_depths["DJEMBES"])
+            
+            if None in [croissant_price, jams_price, djembes_price]:
+                return None
+                
+            return 6 * croissant_price + 3 * jams_price + 1 * djembes_price
+            
+        elif basket_type == "PICNIC_BASKET2":
+            # 4 CROISSANTS + 2 JAMS
+            croissant_price = self.calculate_fair_value(state.order_depths["CROISSANTS"])
+            jams_price = self.calculate_fair_value(state.order_depths["JAMS"])
+            
+            if None in [croissant_price, jams_price]:
+                return None
+                
+            return 4 * croissant_price + 2 * jams_price
+            
+        return None
+
+    def trade_basket_divergence(
+        self, 
+        product: str, 
+        order_depth: OrderDepth, 
+        position: int, 
+        synthetic_value: float
+    ) -> list[Order]:
+        """Trade based on divergence between synthetic value and current price."""
+        orders = []
+        position_limit = self.position_limits[product]
+        
+        if synthetic_value is None:
+            return orders
+            
+        # Calculate current basket price
+        if len(order_depth.sell_orders) > 0 and len(order_depth.buy_orders) > 0:
+            best_ask = min(order_depth.sell_orders.keys())
+            best_bid = max(order_depth.buy_orders.keys())
+            current_price = (best_ask + best_bid) / 2
+            
+            # Calculate divergence
+            divergence = synthetic_value - current_price
+            
+            # Trading thresholds based on basket type
+            if product == "PICNIC_BASKET1":
+                buy_threshold = 10.0  # Buy when basket is underpriced by 10
+                sell_threshold = -10.0  # Sell when basket is overpriced by 10
+            else:  # PICNIC_BASKET2
+                buy_threshold = 15.0  # Buy when basket is underpriced by 15
+                sell_threshold = -15.0  # Sell when basket is overpriced by 15
+            
+            # Take orders based on divergence
+            if divergence > buy_threshold:
+                # Basket is underpriced, buy it
+                ask_amount = -1 * order_depth.sell_orders[best_ask]
+                quantity = min(ask_amount, position_limit - position)
+                if quantity > 0:
+                    orders.append(Order(product, best_ask, quantity))
+                    
+            elif divergence < sell_threshold:
+                # Basket is overpriced, sell it
+                bid_amount = order_depth.buy_orders[best_bid]
+                quantity = min(bid_amount, position_limit + position)
+                if quantity > 0:
+                    orders.append(Order(product, best_bid, -quantity))
+                    
+            # Market making with divergence adjustment
+            make_width = 2.0  # Base spread
+            if abs(divergence) > 2.0:
+                make_width *= 1.5  # Widen spread when divergence is large
+                
+            # Place buy order
+            buy_price = int(current_price - make_width)
+            buy_quantity = position_limit - position
+            if buy_quantity > 0:
+                orders.append(Order(product, buy_price, buy_quantity))
+                
+            # Place sell order
+            sell_price = int(current_price + make_width)
+            sell_quantity = position_limit + position
+            if sell_quantity > 0:
+                orders.append(Order(product, sell_price, -sell_quantity))
+                
+        return orders
+
+    def hedge_basket_position(
+        self,
+        state: TradingState,
+        basket_type: str,
+        basket_position: int
+    ) -> dict[str, list[Order]]:
+        """Generate hedging orders for basket components based on basket position."""
+        orders = {}
+        
+        # Only hedge 50% of the position
+        hedge_position = basket_position // 2
+        
+        if basket_type == "PICNIC_BASKET1":
+            # For each PICNIC_BASKET1, we need to hedge:
+            # -6 CROISSANTS
+            # -3 JAMS
+            # -1 DJEMBES
+            target_positions = {
+                "CROISSANTS": -6 * hedge_position,
+                "JAMS": -3 * hedge_position,
+                "DJEMBES": -1 * hedge_position
+            }
+        else:  # PICNIC_BASKET2
+            # For each PICNIC_BASKET2, we need to hedge:
+            # -4 CROISSANTS
+            # -2 JAMS
+            target_positions = {
+                "CROISSANTS": -4 * hedge_position,
+                "JAMS": -2 * hedge_position
+            }
+        
+        # Generate hedging orders for each component
+        for product, target_position in target_positions.items():
+            if product in state.order_depths:
+                current_position = state.position.get(product, 0)
+                position_diff = target_position - current_position
+                
+                if position_diff != 0:
+                    order_depth = state.order_depths[product]
+                    fair_value = self.calculate_fair_value(order_depth)
+                    
+                    if fair_value is not None:
+                        if position_diff > 0:  # Need to buy
+                            if product not in orders:
+                                orders[product] = []
+                            # Place buy order at fair value
+                            orders[product].append(Order(product, int(fair_value), position_diff))
+                                
+                        else:  # Need to sell
+                            if product not in orders:
+                                orders[product] = []
+                            # Place sell order at fair value
+                            orders[product].append(Order(product, int(fair_value), position_diff))
+        
+        return orders
+
     def run(self, state: TradingState) -> tuple[dict[str, list[Order]], int, str]:
         """
         Main method required by the competition.
@@ -495,7 +641,7 @@ class Trader:
             try:
                 trader_data = jsonpickle.decode(state.traderData)
                 # Load all price histories
-                for product in ["kelp", "resin", "squid_ink", "croissants", "jams", "djembe"]:
+                for product in ["kelp", "resin", "squid_ink", "croissants", "jams", "djembes"]:
                     prices_key = f"{product}_prices"
                     vwap_key = f"{product}_vwap"
                     if prices_key in trader_data:
@@ -505,12 +651,28 @@ class Trader:
             except:
                 logger.print("Could not parse trader data")
 
-        # Process each product only if it's active
+        # Process each product
         for product in state.order_depths.keys():
-            if product in self.active_products and self.active_products[product]:
+            if product in ["PICNIC_BASKET1", "PICNIC_BASKET2"]:
+                # Calculate synthetic value and trade divergence
+                synthetic_value = self.calculate_synthetic_value(state, product)
+                position = state.position.get(product, 0)
+                orders = self.trade_basket_divergence(product, state.order_depths[product], position, synthetic_value)
+                if orders:
+                    result[product] = orders
+                    
+                # Generate hedging orders for basket components
+                hedge_orders = self.hedge_basket_position(state, product, position)
+                for component, component_orders in hedge_orders.items():
+                    if component in result:
+                        result[component].extend(component_orders)
+                    else:
+                        result[component] = component_orders
+                        
+            elif product in self.active_products and self.active_products[product]:
                 position = state.position.get(product, 0)
                 orders = self.product_orders(product, state.order_depths[product], position)
-                if orders:  # Only add to result if we have orders
+                if orders:
                     result[product] = orders
             else:
                 # For inactive products, if we have a position, try to close it
@@ -527,13 +689,13 @@ class Trader:
             "squid_ink_prices": self.squid_ink_prices,
             "croissants_prices": self.croissants_prices,
             "jams_prices": self.jams_prices,
-            "djembe_prices": self.djembe_prices,
+            "djembes_prices": self.djembes_prices,
             "kelp_vwap": self.kelp_vwap,
             "resin_vwap": self.resin_vwap,
             "squid_ink_vwap": self.squid_ink_vwap,
             "croissants_vwap": self.croissants_vwap,
             "jams_vwap": self.jams_vwap,
-            "djembe_vwap": self.djembe_vwap,
+            "djembes_vwap": self.djembes_vwap,
         }
 
         serialized_trader_data = jsonpickle.encode(trader_data)
