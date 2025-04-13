@@ -614,19 +614,190 @@ class Trader:
                     fair_value = self.calculate_fair_value(order_depth)
                     
                     if fair_value is not None:
+                        if product not in orders:
+                            orders[product] = []
+                            
+                        # Check if we can place orders without exceeding position limits
                         if position_diff > 0:  # Need to buy
-                            if product not in orders:
-                                orders[product] = []
-                            # Place buy order at fair value
-                            orders[product].append(Order(product, int(fair_value), position_diff))
-                                
+                            # Check if buying would exceed position limit
+                            if current_position + position_diff <= self.position_limits[product]:
+                                # Place buy order at fair value
+                                orders[product].append(Order(product, int(fair_value), position_diff))
                         else:  # Need to sell
-                            if product not in orders:
-                                orders[product] = []
-                            # Place sell order at fair value
-                            orders[product].append(Order(product, int(fair_value), position_diff))
+                            # Check if selling would exceed position limit
+                            if current_position + position_diff >= -self.position_limits[product]:
+                                # Place sell order at fair value
+                                orders[product].append(Order(product, int(fair_value), position_diff))
         
         return orders
+
+    def get_synthetic_basket_order_depth(
+        self, 
+        state: TradingState, 
+        basket_type: str
+    ) -> OrderDepth:
+        """Calculate synthetic order depth for a basket based on its components."""
+        # Initialize the synthetic basket order depth
+        synthetic_order_depth = OrderDepth()
+        
+        # Define basket components and weights
+        if basket_type == "PICNIC_BASKET1":
+            components = {
+                "CROISSANTS": 6,
+                "JAMS": 3,
+                "DJEMBES": 1
+            }
+        else:  # PICNIC_BASKET2
+            components = {
+                "CROISSANTS": 4,
+                "JAMS": 2
+            }
+        
+        # Calculate best bids and asks for each component
+        component_bids = {}
+        component_asks = {}
+        for product, weight in components.items():
+            if product in state.order_depths and state.order_depths[product].buy_orders:
+                component_bids[product] = max(state.order_depths[product].buy_orders.keys())
+            else:
+                component_bids[product] = 0
+                
+            if product in state.order_depths and state.order_depths[product].sell_orders:
+                component_asks[product] = min(state.order_depths[product].sell_orders.keys())
+            else:
+                component_asks[product] = float('inf')
+        
+        # Calculate implied bid (what you could sell basket for by buying components)
+        implied_bid = sum(component_bids[product] * weight for product, weight in components.items())
+        
+        # Calculate implied ask (what you could buy basket for by selling components)
+        implied_ask = sum(component_asks[product] * weight for product, weight in components.items())
+        
+        # Calculate maximum number of baskets that could be created/disassembled
+        if implied_bid > 0:
+            bid_volumes = []
+            for product, weight in components.items():
+                if product in state.order_depths and component_bids[product] > 0:
+                    # How many baskets can be created based on this component's available volume
+                    volume = state.order_depths[product].buy_orders[component_bids[product]] // weight
+                    bid_volumes.append(volume)
+                else:
+                    bid_volumes.append(0)
+            
+            implied_bid_volume = min(bid_volumes) if bid_volumes else 0
+            synthetic_order_depth.buy_orders[implied_bid] = implied_bid_volume
+        
+        if implied_ask < float('inf'):
+            ask_volumes = []
+            for product, weight in components.items():
+                if product in state.order_depths and component_asks[product] < float('inf'):
+                    # How many baskets can be disassembled based on this component's available volume
+                    volume = abs(state.order_depths[product].sell_orders[component_asks[product]]) // weight
+                    ask_volumes.append(volume)
+                else:
+                    ask_volumes.append(0)
+            
+            implied_ask_volume = min(ask_volumes) if ask_volumes else 0
+            synthetic_order_depth.sell_orders[implied_ask] = -implied_ask_volume
+        
+        return synthetic_order_depth
+    
+    def execute_basket_arbitrage(
+        self, 
+        state: TradingState, 
+        basket_type: str
+    ) -> dict[str, list[Order]]:
+        """Execute arbitrage between basket and its components when profitable."""
+        result = {}
+        
+        # Get the actual basket order depth
+        basket_order_depth = state.order_depths[basket_type]
+        
+        # Get the synthetic basket order depth
+        synthetic_order_depth = self.get_synthetic_basket_order_depth(state, basket_type)
+        
+        # Define basket components and weights
+        if basket_type == "PICNIC_BASKET1":
+            components = {
+                "CROISSANTS": 6,
+                "JAMS": 3,
+                "DJEMBES": 1
+            }
+        else:  # PICNIC_BASKET2
+            components = {
+                "CROISSANTS": 4,
+                "JAMS": 2
+            }
+        
+        # Calculate arbitrage opportunities
+        
+        # Opportunity 1: Buy the basket, sell the components
+        if basket_order_depth.sell_orders and synthetic_order_depth.buy_orders:
+            basket_ask = min(basket_order_depth.sell_orders.keys())
+            synthetic_bid = max(synthetic_order_depth.buy_orders.keys())
+            
+            # If buying basket and selling components is profitable
+            if basket_ask < synthetic_bid:
+                basket_ask_volume = abs(basket_order_depth.sell_orders[basket_ask])
+                synthetic_bid_volume = synthetic_order_depth.buy_orders[synthetic_bid]
+                
+                # How many baskets to arbitrage
+                arb_volume = min(basket_ask_volume, synthetic_bid_volume)
+                
+                # Limit by position limits
+                basket_position = state.position.get(basket_type, 0)
+                arb_volume = min(arb_volume, self.position_limits[basket_type] - basket_position)
+                
+                if arb_volume > 0:
+                    # Buy the basket
+                    if basket_type not in result:
+                        result[basket_type] = []
+                    result[basket_type].append(Order(basket_type, basket_ask, arb_volume))
+                    
+                    # Sell the components
+                    for product, weight in components.items():
+                        if product not in result:
+                            result[product] = []
+                        
+                        # Find best bid for this component
+                        if product in state.order_depths and state.order_depths[product].buy_orders:
+                            best_bid = max(state.order_depths[product].buy_orders.keys())
+                            result[product].append(Order(product, best_bid, -weight * arb_volume))
+        
+        # Opportunity 2: Buy the components, sell the basket
+        if basket_order_depth.buy_orders and synthetic_order_depth.sell_orders:
+            basket_bid = max(basket_order_depth.buy_orders.keys())
+            synthetic_ask = min(synthetic_order_depth.sell_orders.keys())
+            
+            # If buying components and selling basket is profitable
+            if basket_bid > synthetic_ask:
+                basket_bid_volume = basket_order_depth.buy_orders[basket_bid]
+                synthetic_ask_volume = abs(synthetic_order_depth.sell_orders[synthetic_ask])
+                
+                # How many baskets to arbitrage
+                arb_volume = min(basket_bid_volume, synthetic_ask_volume)
+                
+                # Limit by position limits
+                basket_position = state.position.get(basket_type, 0)
+                arb_volume = min(arb_volume, self.position_limits[basket_type] + basket_position)
+                
+                if arb_volume > 0:
+                    # Sell the basket
+                    if basket_type not in result:
+                        result[basket_type] = []
+                    result[basket_type].append(Order(basket_type, basket_bid, -arb_volume))
+                    
+                    # Buy the components
+                    for product, weight in components.items():
+                        if product not in result:
+                            result[product] = []
+                        
+                        # Find best ask for this component
+                        if product in state.order_depths and state.order_depths[product].sell_orders:
+                            best_ask = min(state.order_depths[product].sell_orders.keys())
+                            result[product].append(Order(product, best_ask, weight * arb_volume))
+        
+        return result
 
     def run(self, state: TradingState) -> tuple[dict[str, list[Order]], int, str]:
         """
@@ -654,20 +825,35 @@ class Trader:
         # Process each product
         for product in state.order_depths.keys():
             if product in ["PICNIC_BASKET1", "PICNIC_BASKET2"]:
-                # Calculate synthetic value and trade divergence
-                synthetic_value = self.calculate_synthetic_value(state, product)
-                position = state.position.get(product, 0)
-                orders = self.trade_basket_divergence(product, state.order_depths[product], position, synthetic_value)
-                if orders:
-                    result[product] = orders
+                # Try to execute basket arbitrage
+                arbitrage_orders = self.execute_basket_arbitrage(state, product)
+                
+                # If no arbitrage was possible, fall back to divergence trading
+                if not arbitrage_orders or product not in arbitrage_orders:
+                    # Calculate synthetic value and trade divergence
+                    synthetic_value = self.calculate_synthetic_value(state, product)
+                    position = state.position.get(product, 0)
+                    orders = self.trade_basket_divergence(product, state.order_depths[product], position, synthetic_value)
+                    if orders:
+                        result[product] = orders
+                else:
+                    # Merge arbitrage orders into result
+                    for p, orders in arbitrage_orders.items():
+                        if p in result:
+                            result[p].extend(orders)
+                        else:
+                            result[p] = orders
                     
-                # Generate hedging orders for basket components
-                hedge_orders = self.hedge_basket_position(state, product, position)
-                for component, component_orders in hedge_orders.items():
-                    if component in result:
-                        result[component].extend(component_orders)
-                    else:
-                        result[component] = component_orders
+                # Only hedge if we couldn't execute a clean arbitrage
+                if product not in arbitrage_orders:
+                    # Generate hedging orders for basket components
+                    position = state.position.get(product, 0)
+                    hedge_orders = self.hedge_basket_position(state, product, position)
+                    for component, component_orders in hedge_orders.items():
+                        if component in result:
+                            result[component].extend(component_orders)
+                        else:
+                            result[component] = component_orders
                         
             elif product in self.active_products and self.active_products[product]:
                 position = state.position.get(product, 0)
