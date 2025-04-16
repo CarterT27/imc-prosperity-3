@@ -203,8 +203,8 @@ class Trader:
             "VOLCANIC_ROCK_VOUCHER_10500": 10500,
         }
         self.days_to_expiry = 7
-        self.mean_volatility = 0.15
-        self.volatility_window = 10
+        self.mean_volatility = 0.18
+        self.volatility_window = 20
         self.zscore_threshold = 1.8
         self.past_volatilities = {}
         self.arbitrage_threshold = 0.01
@@ -654,16 +654,41 @@ class Trader:
             voucher_mid = self.calculate_fair_value(voucher_order_depth)
             if rock_mid is None or voucher_mid is None:
                 return [], []
+
             tte = self.days_to_expiry / 365.0
             strike = self.voucher_strikes[voucher_symbol]
-            theoretical_price = self.black_scholes_call(rock_mid, strike, tte, self.risk_free_rate, self.mean_volatility)
+
+            # Calculate implied volatility for this specific voucher
+            current_implied_vol = self.implied_volatility(voucher_mid, rock_mid, strike, tte, self.risk_free_rate)
+
+            # Initialize or update volatility history for this strike
+            if voucher_symbol not in self.past_volatilities:
+                self.past_volatilities[voucher_symbol] = []
+            
+            self.past_volatilities[voucher_symbol].append(current_implied_vol)
+            
+            # Keep only the last 20 volatility readings
+            if len(self.past_volatilities[voucher_symbol]) > self.volatility_window:
+                self.past_volatilities[voucher_symbol].pop(0)
+
+            # Use the mean of recent volatilities if available, otherwise use current
+            if len(self.past_volatilities[voucher_symbol]) > 0:
+                volatility = statistics.mean(self.past_volatilities[voucher_symbol])
+            else:
+                volatility = current_implied_vol
+
+            # Calculate theoretical price using the rolling window volatility
+            theoretical_price = self.black_scholes_call(rock_mid, strike, tte, self.risk_free_rate, volatility)
+
             make_orders = []
             if voucher_position < self.position_limits[voucher_symbol]:
                 buy_price = int(theoretical_price)
                 make_orders.append(Order(voucher_symbol, buy_price, self.position_limits[voucher_symbol] - voucher_position))
+            
             if voucher_position > -self.position_limits[voucher_symbol]:
                 sell_price = int(theoretical_price + 1)
                 make_orders.append(Order(voucher_symbol, sell_price, -self.position_limits[voucher_symbol] - voucher_position))
+
             return [], make_orders
         except Exception as e:
             logger.print(f"Error in volcanic_rock_voucher_orders: {e}")
@@ -693,18 +718,40 @@ class Trader:
         fair_price = rock_price - strike * math.exp(-self.risk_free_rate * tte)
         return synthetic_price, fair_price
 
-    def volcanic_rock_orders(self, rock_order_depth: OrderDepth, rock_position: int) -> list[Order]:
+    def volcanic_rock_orders(self, rock_order_depth: OrderDepth, rock_position: int, state: TradingState) -> list[Order]:
         orders = []
         rock_mid = self.calculate_fair_value(rock_order_depth)
         if rock_mid is None:
             return orders
-        avg_strike = sum(self.voucher_strikes.values()) / len(self.voucher_strikes)
+
+        # Calculate average of rolling window volatilities for each strike
+        rolling_vols = []
         tte = self.days_to_expiry / 365.0
-        vol = self.mean_volatility
+        
+        for voucher_symbol in self.voucher_strikes.keys():
+            if voucher_symbol in self.past_volatilities and len(self.past_volatilities[voucher_symbol]) > 0:
+                # Use the mean of the rolling window for this strike
+                rolling_vol = statistics.mean(self.past_volatilities[voucher_symbol])
+                rolling_vols.append(rolling_vol)
+            elif voucher_symbol in state.order_depths:
+                # If no history, calculate current IV
+                voucher_order_depth = state.order_depths[voucher_symbol]
+                voucher_mid = self.calculate_fair_value(voucher_order_depth)
+                
+                if voucher_mid is not None:
+                    strike = self.voucher_strikes[voucher_symbol]
+                    current_vol = self.implied_volatility(voucher_mid, rock_mid, strike, tte, self.risk_free_rate)
+                    rolling_vols.append(current_vol)
+
+        # Use average of rolling window volatilities, or fallback to mean_volatility if none available
+        vol = statistics.mean(rolling_vols) if rolling_vols else self.mean_volatility
+
+        avg_strike = sum(self.voucher_strikes.values()) / len(self.voucher_strikes)
         theoretical_price = self.black_scholes_call(rock_mid, avg_strike, tte, self.risk_free_rate, vol)
+        
         threshold = 0.5
         position_limit = self.position_limits["VOLCANIC_ROCK"]
-        logger.print("VOLCANIC_ROCK:", "rock_mid=", rock_mid, "theoretical_price=", theoretical_price)
+
         if rock_mid < theoretical_price - threshold:
             if len(rock_order_depth.sell_orders) > 0:
                 best_ask = min(rock_order_depth.sell_orders.keys())
@@ -717,6 +764,7 @@ class Trader:
                 quantity = min(position_limit + rock_position, rock_order_depth.buy_orders[best_bid])
                 if quantity > 0:
                     orders.append(Order("VOLCANIC_ROCK", best_bid, -quantity))
+
         return orders
 
     def get_synthetic_basket_order_depth(self, state: TradingState, basket_type: str) -> OrderDepth:
@@ -823,7 +871,7 @@ class Trader:
                             result["VOLCANIC_ROCK"] = hedge_orders
                     except Exception as e:
                         logger.print(f"Error generating hedge orders: {e}")
-                vol_orders = self.volcanic_rock_orders(rock_order_depth, rock_position)
+                vol_orders = self.volcanic_rock_orders(rock_order_depth, rock_position, state)
                 if vol_orders:
                     result.setdefault("VOLCANIC_ROCK", []).extend(vol_orders)
                 handled.add("VOLCANIC_ROCK")
