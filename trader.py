@@ -482,71 +482,6 @@ class Trader:
                     orders.append(Order(product, sell_price, -sell_quantity))
         return orders
 
-    def hedge_basket_position(self, state: TradingState, basket_type: str, basket_position: int) -> dict[str, list[Order]]:
-        orders = {}
-        hedge_position = basket_position // 2
-        if basket_type == "PICNIC_BASKET1":
-            target_positions = {"CROISSANTS": -6 * hedge_position, "JAMS": -3 * hedge_position, "DJEMBES": -1 * hedge_position}
-        else:
-            target_positions = {"CROISSANTS": -4 * hedge_position, "JAMS": -2 * hedge_position}
-        for product, target_position in target_positions.items():
-            if product in state.order_depths:
-                current_position = state.position.get(product, 0)
-                position_diff = target_position - current_position
-                if position_diff != 0:
-                    order_depth = state.order_depths[product]
-                    fair_value = self.calculate_fair_value(order_depth)
-                    if fair_value is not None:
-                        orders.setdefault(product, [])
-                        if position_diff > 0:
-                            if current_position + position_diff <= self.position_limits[product]:
-                                orders[product].append(Order(product, int(fair_value), position_diff))
-                        else:
-                            if current_position + position_diff >= -self.position_limits[product]:
-                                orders[product].append(Order(product, int(fair_value), position_diff))
-        return orders
-
-    def get_synthetic_basket_order_depth(self, state: TradingState, basket_type: str) -> OrderDepth:
-        synthetic_order_depth = OrderDepth()
-        if basket_type == "PICNIC_BASKET1":
-            components = {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1}
-        else:
-            components = {"CROISSANTS": 4, "JAMS": 2}
-        component_bids = {}
-        component_asks = {}
-        for product, weight in components.items():
-            if product in state.order_depths and state.order_depths[product].buy_orders:
-                component_bids[product] = max(state.order_depths[product].buy_orders.keys())
-            else:
-                component_bids[product] = 0
-            if product in state.order_depths and state.order_depths[product].sell_orders:
-                component_asks[product] = min(state.order_depths[product].sell_orders.keys())
-            else:
-                component_asks[product] = float('inf')
-        implied_bid = sum(component_bids[p] * w for p, w in components.items())
-        implied_ask = sum(component_asks[p] * w for p, w in components.items())
-        if implied_bid > 0:
-            bid_volumes = []
-            for p, w in components.items():
-                if p in state.order_depths and component_bids[p] > 0:
-                    volume = state.order_depths[p].buy_orders[component_bids[p]] // w
-                    bid_volumes.append(volume)
-                else:
-                    bid_volumes.append(0)
-            implied_bid_volume = min(bid_volumes) if bid_volumes else 0
-            synthetic_order_depth.buy_orders[implied_bid] = implied_bid_volume
-        if implied_ask < float('inf'):
-            ask_volumes = []
-            for p, w in components.items():
-                if p in state.order_depths and state.order_depths[p].sell_orders:
-                    volume = abs(state.order_depths[p].sell_orders[component_asks[p]]) // w
-                    ask_volumes.append(volume)
-                else:
-                    ask_volumes.append(0)
-            implied_ask_volume = min(ask_volumes) if ask_volumes else 0
-            synthetic_order_depth.sell_orders[implied_ask] = -implied_ask_volume
-        return synthetic_order_depth
-
     def execute_basket_arbitrage(self, state: TradingState, basket_type: str) -> dict[str, list[Order]]:
         result = {}
         basket_order_depth = state.order_depths[basket_type]
@@ -784,6 +719,47 @@ class Trader:
                     orders.append(Order("VOLCANIC_ROCK", best_bid, -quantity))
         return orders
 
+    def get_synthetic_basket_order_depth(self, state: TradingState, basket_type: str) -> OrderDepth:
+        synthetic_order_depth = OrderDepth()
+        if basket_type == "PICNIC_BASKET1":
+            components = {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1}
+        else:
+            components = {"CROISSANTS": 4, "JAMS": 2}
+        component_bids = {}
+        component_asks = {}
+        for product, weight in components.items():
+            if product in state.order_depths and state.order_depths[product].buy_orders:
+                component_bids[product] = max(state.order_depths[product].buy_orders.keys())
+            else:
+                component_bids[product] = 0
+            if product in state.order_depths and state.order_depths[product].sell_orders:
+                component_asks[product] = min(state.order_depths[product].sell_orders.keys())
+            else:
+                component_asks[product] = float('inf')
+        implied_bid = sum(component_bids[p] * w for p, w in components.items())
+        implied_ask = sum(component_asks[p] * w for p, w in components.items())
+        if implied_bid > 0:
+            bid_volumes = []
+            for p, w in components.items():
+                if p in state.order_depths and component_bids[p] > 0:
+                    volume = state.order_depths[p].buy_orders[component_bids[p]] // w
+                    bid_volumes.append(volume)
+                else:
+                    bid_volumes.append(0)
+            implied_bid_volume = min(bid_volumes) if bid_volumes else 0
+            synthetic_order_depth.buy_orders[implied_bid] = implied_bid_volume
+        if implied_ask < float('inf'):
+            ask_volumes = []
+            for p, w in components.items():
+                if p in state.order_depths and state.order_depths[p].sell_orders:
+                    volume = abs(state.order_depths[p].sell_orders[component_asks[p]]) // w
+                    ask_volumes.append(volume)
+                else:
+                    ask_volumes.append(0)
+            implied_ask_volume = min(ask_volumes) if ask_volumes else 0
+            synthetic_order_depth.sell_orders[implied_ask] = -implied_ask_volume
+        return synthetic_order_depth
+
     def run(self, state: TradingState) -> tuple[dict[str, list[Order]], int, str]:
         try:
             result = {}
@@ -866,10 +842,6 @@ class Trader:
                     else:
                         for p, orders in arbitrage_orders.items():
                             result.setdefault(p, []).extend(orders)
-                    position = state.position.get(product, 0)
-                    hedge_orders = self.hedge_basket_position(state, product, position)
-                    for comp, comp_orders in hedge_orders.items():
-                        result.setdefault(comp, []).extend(comp_orders)
                 elif product in self.active_products and self.active_products[product]:
                     position = state.position.get(product, 0)
                     orders = self.product_orders(product, state.order_depths[product], position)
