@@ -656,13 +656,13 @@ class Trader:
                 return [], []
             tte = self.days_to_expiry / 365.0
             strike = self.voucher_strikes[voucher_symbol]
-            intrinsic_value = max(0, rock_mid - strike)
+            theoretical_price = self.black_scholes_call(rock_mid, strike, tte, self.risk_free_rate, self.mean_volatility)
             make_orders = []
             if voucher_position < self.position_limits[voucher_symbol]:
-                buy_price = int(intrinsic_value)
+                buy_price = int(theoretical_price)
                 make_orders.append(Order(voucher_symbol, buy_price, self.position_limits[voucher_symbol] - voucher_position))
             if voucher_position > -self.position_limits[voucher_symbol]:
-                sell_price = int(intrinsic_value + 1)
+                sell_price = int(theoretical_price + 1)
                 make_orders.append(Order(voucher_symbol, sell_price, -self.position_limits[voucher_symbol] - voucher_position))
             return [], make_orders
         except Exception as e:
