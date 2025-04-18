@@ -252,7 +252,6 @@ class Trader:
         width: int,
     ) -> tuple[int, int]:
         position_after_take = position + buy_order_volume - sell_order_volume
-        fair = int(round(fair_value))
         fair_for_bid = int(math.floor(fair_value))
         fair_for_ask = int(math.ceil(fair_value))
         buy_quantity = position_limit - (position + buy_order_volume)
