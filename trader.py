@@ -158,6 +158,7 @@ class Trader:
             "PICNIC_BASKET1": True,
             "PICNIC_BASKET2": True,
             "VOLCANIC_ROCK": True,
+            "MAGNIFICENT_MACARONS": True,
         }
         self.position_limits = {
             "KELP": 50,
@@ -174,6 +175,7 @@ class Trader:
             "VOLCANIC_ROCK_VOUCHER_10250": 200,
             "VOLCANIC_ROCK_VOUCHER_10500": 200,
             "VOLCANIC_ROCK": 400,
+            "MAGNIFICENT_MACARONS": 75,
         }
         self.timespan = 20
         self.make_width = {
@@ -211,7 +213,7 @@ class Trader:
         self.volatility_window = 30
         self.zscore_threshold = 1.8
         self.past_volatilities = {}
-        self.arbitrage_threshold = 0.01
+        self.arbitrage_threshold = 0.001
         self.max_arbitrage_size = 50
         self.risk_free_rate = 0.0
         self.stop_loss_multiplier = 1.2
@@ -227,6 +229,15 @@ class Trader:
         self.max_volatility_history = 30
         self.cache = {}
         self.last_tick_time = 0
+        self.macaron_edge = 1.0
+        self.macaron_target_vol = 10
+        self.macaron_fill_history: list[int] = []
+        self.CSI_window = 100
+        self.CSI_percentile = 0.20
+        self.CSI_history: list[float] = []
+        self.low_sun_regime = False
+        self.timespan = 20
+        self.cache: dict[str, float] = {}
 
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         try:
@@ -1059,6 +1070,17 @@ class Trader:
             result = {}
             conversions = 0
             trader_data = {}
+
+            obs = state.observations
+            if "MAGNIFICENT_MACARONS" in obs.conversionObservations:
+                sun = obs.conversionObservations["MAGNIFICENT_MACARONS"].sunlightIndex
+                self.CSI_history.append(sun)
+                if len(self.CSI_history) > self.CSI_window:
+                    self.CSI_history.pop(0)
+                csi_thresh = np.percentile(self.CSI_history, 100 * self.CSI_percentile)
+                self.low_sun_regime = len(self.CSI_history) >= 5 and all(x < csi_thresh for x in self.CSI_history[-5:])
+            else:
+                self.low_sun_regime = False
             
             current_day = state.timestamp // 1000000
             if current_day != self.current_day:
@@ -1082,7 +1104,32 @@ class Trader:
                 except Exception as e:
                     logger.print(f"Could not parse trader data: {e}")
 
+            if "MAGNIFICENT_MACARONS" in state.order_depths:
+                od = state.order_depths["MAGNIFICENT_MACARONS"]
+                mac_mid = self.calculate_fair_value(od)
+                sugar_od = state.order_depths.get("SUGAR")
+                if mac_mid is not None and sugar_od:
+                    sugar_mid = self.calculate_fair_value(sugar_od)
+                    conv = obs.conversionObservations["MAGNIFICENT_MACARONS"]
+                    synth_ask = sugar_mid + conv.transportFees + conv.importTariff
+                    synth_bid = sugar_mid - (conv.transportFees + conv.exportTariff)
+                    best_ask = min(od.sell_orders) if od.sell_orders else None
+                    best_bid = max(od.buy_orders) if od.buy_orders else None
+                    edge = self.macaron_edge * (1.5 if self.low_sun_regime else 1.0)
+
+                    if best_ask is not None and synth_bid > best_ask + edge:
+                        qty = min(-od.sell_orders[best_ask],
+                                self.position_limits["MAGNIFICENT_MACARONS"] - state.position.get("MAGNIFICENT_MACARONS", 0))
+                        if qty > 0:
+                            result.setdefault("MAGNIFICENT_MACARONS", []).append(Order("MAGNIFICENT_MACARONS", best_ask, qty))
+                    elif best_bid is not None and synth_ask < best_bid - edge:
+                        qty = min(od.buy_orders[best_bid],
+                                self.position_limits["MAGNIFICENT_MACARONS"] + state.position.get("MAGNIFICENT_MACARONS", 0))
+                        if qty > 0:
+                            result.setdefault("MAGNIFICENT_MACARONS", []).append(Order("MAGNIFICENT_MACARONS", best_bid, -qty))
+                       
             handled = set()
+
             # Handle vouchers and VOLCANIC_ROCK
             if "VOLCANIC_ROCK" in state.order_depths:
                 rock_position = state.position.get("VOLCANIC_ROCK", 0)
