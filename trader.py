@@ -157,7 +157,7 @@ class Trader:
             "DJEMBES": True,
             "PICNIC_BASKET1": True,
             "PICNIC_BASKET2": True,
-            "VOLCANIC_ROCK": False,
+            "VOLCANIC_ROCK": True,
         }
         self.position_limits = {
             "KELP": 50,
@@ -208,7 +208,7 @@ class Trader:
         }
         self.days_to_expiry = 7
         self.mean_volatility = 0.18
-        self.volatility_window = 20
+        self.volatility_window = 30
         self.zscore_threshold = 1.8
         self.past_volatilities = {}
         self.arbitrage_threshold = 0.01
@@ -744,7 +744,7 @@ class Trader:
         self, state: TradingState, rock_order_depth: OrderDepth, rock_mid: float
     ) -> list[Order]:
         orders = []
-        tte = self.days_to_expiry / 365
+        tte = self.get_time_to_expiry(state.timestamp)
         voucher_prices = {}
         for voucher_symbol in self.voucher_strikes.keys():
             if voucher_symbol in state.order_depths:
@@ -841,7 +841,7 @@ class Trader:
             if rock_mid is None or voucher_mid is None:
                 return [], []
 
-            tte = self.days_to_expiry / 365.0
+            tte = self.get_time_to_expiry(state.timestamp)
             strike = self.voucher_strikes[voucher_symbol]
 
             # Calculate implied volatility for this specific voucher
@@ -943,7 +943,7 @@ class Trader:
 
         # Calculate average of rolling window volatilities for each strike
         rolling_vols = []
-        tte = self.days_to_expiry / 365.0
+        tte = self.get_time_to_expiry(state.timestamp)
 
         for voucher_symbol in self.voucher_strikes.keys():
             if (
@@ -1049,6 +1049,11 @@ class Trader:
             synthetic_order_depth.sell_orders[implied_ask] = -implied_ask_volume
         return synthetic_order_depth
 
+    def get_time_to_expiry(self, timestamp):
+        current_day = timestamp // 1000000
+        days_remaining = max(0, 6 - current_day)  # Assuming 7-day expiry from day 0
+        return days_remaining / 365.0
+
     def run(self, state: TradingState) -> tuple[dict[str, list[Order]], int, str]:
         try:
             result = {}
@@ -1059,6 +1064,10 @@ class Trader:
             if current_day != self.current_day:
                 self.daily_pnl = 0
                 self.current_day = current_day
+            
+            # Update days_to_expiry based on current timestamp
+            days_remaining = max(0, 7 - current_day)
+            self.days_to_expiry = days_remaining
             
             if state.traderData and state.traderData != "SAMPLE":
                 try:
