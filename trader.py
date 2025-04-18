@@ -157,6 +157,7 @@ class Trader:
             "DJEMBES": True,
             "PICNIC_BASKET1": True,
             "PICNIC_BASKET2": True,
+            "VOLCANIC_ROCK": False,
         }
         self.position_limits = {
             "KELP": 50,
@@ -1053,88 +1054,89 @@ class Trader:
             result = {}
             conversions = 0
             trader_data = {}
+            
             current_day = state.timestamp // 1000000
             if current_day != self.current_day:
                 self.daily_pnl = 0
                 self.current_day = current_day
+            
             if state.traderData and state.traderData != "SAMPLE":
                 try:
                     trader_data = jsonpickle.decode(state.traderData)
                     if "past_volatilities" in trader_data:
                         self.past_volatilities = trader_data["past_volatilities"]
-                    for prod in [
-                        "kelp",
-                        "resin",
-                        "squid_ink",
-                        "croissants",
-                        "jams",
-                        "djembes",
-                    ]:
+                    for prod in ["kelp", "resin", "squid_ink", "croissants", "jams", "djembes"]:
                         if f"{prod}_prices" in trader_data:
-                            setattr(
-                                self, f"{prod}_prices", trader_data[f"{prod}_prices"]
-                            )
+                            setattr(self, f"{prod}_prices", trader_data[f"{prod}_prices"])
                         if f"{prod}_vwap" in trader_data:
                             setattr(self, f"{prod}_vwap", trader_data[f"{prod}_vwap"])
                 except Exception as e:
                     logger.print(f"Could not parse trader data: {e}")
+
             handled = set()
+            # Handle vouchers and VOLCANIC_ROCK
             if "VOLCANIC_ROCK" in state.order_depths:
                 rock_position = state.position.get("VOLCANIC_ROCK", 0)
                 rock_order_depth = state.order_depths["VOLCANIC_ROCK"]
                 rock_mid = self.calculate_fair_value(rock_order_depth)
+
+                # Always process vouchers
                 if rock_mid is not None:
-                    arbitrage_orders = self.find_arbitrage_opportunities(
-                        state, rock_order_depth, rock_mid
-                    )
-                    if arbitrage_orders:
-                        for order in arbitrage_orders:
-                            result.setdefault(order.symbol, []).append(order)
-                voucher_positions = {}
-                voucher_deltas = {}
-                for voucher_symbol in self.voucher_strikes.keys():
-                    if voucher_symbol in state.order_depths:
-                        try:
-                            voucher_position = state.position.get(voucher_symbol, 0)
-                            voucher_positions[voucher_symbol] = voucher_position
-                            take_orders, make_orders = (
-                                self.volcanic_rock_voucher_orders(
+                    voucher_positions = {}
+                    voucher_deltas = {}
+                    for voucher_symbol in self.voucher_strikes.keys():
+                        if voucher_symbol in state.order_depths:
+                            try:
+                                voucher_position = state.position.get(voucher_symbol, 0)
+                                voucher_positions[voucher_symbol] = voucher_position
+                                take_orders, make_orders = self.volcanic_rock_voucher_orders(
                                     state,
                                     rock_order_depth,
                                     rock_position,
                                     voucher_symbol,
                                     state.order_depths[voucher_symbol],
                                     voucher_position,
-                                    trader_data,
+                                    trader_data
                                 )
+                                if take_orders or make_orders:
+                                    result.setdefault(voucher_symbol, []).extend(take_orders + make_orders)
+                            except Exception as e:
+                                logger.print(f"Error processing voucher {voucher_symbol}: {e}")
+
+                # Only trade VOLCANIC_ROCK if it's active
+                if self.active_products.get("VOLCANIC_ROCK", False):
+                    if rock_mid is not None:
+                        arbitrage_orders = self.find_arbitrage_opportunities(state, rock_order_depth, rock_mid)
+                        if arbitrage_orders:
+                            for order in arbitrage_orders:
+                                result.setdefault(order.symbol, []).append(order)
+                    
+                    if voucher_deltas:
+                        try:
+                            hedge_orders = self.volcanic_rock_hedge_orders(
+                                rock_order_depth,
+                                rock_position,
+                                voucher_positions,
+                                voucher_deltas
                             )
-                            if take_orders or make_orders:
-                                result.setdefault(voucher_symbol, []).extend(
-                                    take_orders + make_orders
-                                )
+                            if hedge_orders:
+                                result["VOLCANIC_ROCK"] = hedge_orders
                         except Exception as e:
-                            logger.print(
-                                f"Error processing voucher {voucher_symbol}: {e}"
-                            )
-                if voucher_deltas:
-                    try:
-                        hedge_orders = self.volcanic_rock_hedge_orders(
-                            rock_order_depth,
-                            rock_position,
-                            voucher_positions,
-                            voucher_deltas,
-                        )
-                        if hedge_orders:
-                            result["VOLCANIC_ROCK"] = hedge_orders
-                    except Exception as e:
-                        logger.print(f"Error generating hedge orders: {e}")
-                vol_orders = self.volcanic_rock_orders(
-                    rock_order_depth, rock_position, state
-                )
-                if vol_orders:
-                    result.setdefault("VOLCANIC_ROCK", []).extend(vol_orders)
+                            logger.print(f"Error generating hedge orders: {e}")
+                    
+                    vol_orders = self.volcanic_rock_orders(rock_order_depth, rock_position, state)
+                    if vol_orders:
+                        result.setdefault("VOLCANIC_ROCK", []).extend(vol_orders)
+                # If VOLCANIC_ROCK is not active but we have a position, close it
+                elif rock_position != 0:
+                    orders = self.close_position("VOLCANIC_ROCK", rock_order_depth, rock_position)
+                    if orders:
+                        result["VOLCANIC_ROCK"] = orders
+
                 handled.add("VOLCANIC_ROCK")
                 handled.update(self.voucher_strikes.keys())
+
+            # Handle other products
             for product in state.order_depths.keys():
                 if product in handled:
                     continue
@@ -1143,12 +1145,7 @@ class Trader:
                     if not arbitrage_orders or product not in arbitrage_orders:
                         synthetic_value = self.calculate_synthetic_value(state, product)
                         position = state.position.get(product, 0)
-                        orders = self.trade_basket_divergence(
-                            product,
-                            state.order_depths[product],
-                            position,
-                            synthetic_value,
-                        )
+                        orders = self.trade_basket_divergence(product, state.order_depths[product], position, synthetic_value)
                         if orders:
                             result[product] = orders
                     else:
@@ -1156,19 +1153,16 @@ class Trader:
                             result.setdefault(p, []).extend(orders)
                 elif product in self.active_products and self.active_products[product]:
                     position = state.position.get(product, 0)
-                    orders = self.product_orders(
-                        product, state.order_depths[product], position
-                    )
+                    orders = self.product_orders(product, state.order_depths[product], position)
                     if orders:
                         result[product] = orders
                 else:
                     position = state.position.get(product, 0)
                     if position != 0:
-                        orders = self.close_position(
-                            product, state.order_depths[product], position
-                        )
+                        orders = self.close_position(product, state.order_depths[product], position)
                         if orders:
                             result[product] = orders
+
             trader_data["past_volatilities"] = self.past_volatilities
             serialized_trader_data = jsonpickle.encode(trader_data)
             if len(self.cache) > 1000:
