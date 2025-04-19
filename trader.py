@@ -1070,8 +1070,8 @@ class Trader:
         Calculate the implied bid and ask prices for a product with conversion observations.
 
         For MAGNIFICENT_MACARONS:
-        - Implied bid = sugar_price - exportTariff - transportFees - 0.1
-        - Implied ask = sugar_price + importTariff + transportFees
+        - Implied bid = bidPrice - exportTariff - transportFees - 0.1
+        - Implied ask = askPrice + importTariff + transportFees
 
         This mirrors the implementation from the orchids_implied_bid_ask method in round_2_v3.py
         """
@@ -1080,12 +1080,9 @@ class Trader:
 
         conv_obs = observation.conversionObservations[product]
 
-        implied_bid = (
-            conv_obs.sugarPrice - conv_obs.exportTariff - conv_obs.transportFees - 0.1
-        )
-        implied_ask = (
-            conv_obs.sugarPrice + conv_obs.importTariff + conv_obs.transportFees
-        )
+        # Use bidPrice and askPrice directly from the observation
+        implied_bid = conv_obs.bidPrice - conv_obs.exportTariff - conv_obs.transportFees - 0.1
+        implied_ask = conv_obs.askPrice + conv_obs.importTariff + conv_obs.transportFees
 
         return implied_bid, implied_ask
 
@@ -1122,7 +1119,7 @@ class Trader:
 
         # Calculate edge for aggressive taking
         conv = observation.conversionObservations["MAGNIFICENT_MACARONS"]
-        foreign_mid = (conv.sugarPrice * 2) / 2  # Simplified mid price
+        foreign_mid = (conv.bidPrice + conv.askPrice) / 2  # Mid price from observation
 
         # Edge calculation - will be more aggressive in low sunlight regime
         make_probability = 0.5  # Probability parameter similar to orchids
@@ -1259,12 +1256,11 @@ class Trader:
             bid = implied_bid - edge
             ask = implied_ask + edge
 
-            # Get sugar price for aggressive pricing
+            # Get observation data for pricing adjustments
             conv = observation.conversionObservations["MAGNIFICENT_MACARONS"]
-            sugar_price = conv.sugarPrice
-
-            # Calculate aggressive ask price (similar to orchids strategy)
-            aggressive_ask = sugar_price - 1.6
+            
+            # Calculate aggressive ask price based on bid observation
+            aggressive_ask = conv.bidPrice - 1.0
 
             # Use aggressive ask if it's profitable
             min_edge = 0.5  # Minimum acceptable edge
