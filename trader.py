@@ -1083,7 +1083,9 @@ class Trader:
         conv_obs = observation.conversionObservations[product]
 
         # Calculate implied prices based on foreign market prices and tariffs
-        implied_bid = conv_obs.bidPrice - conv_obs.exportTariff - conv_obs.transportFees - 0.1
+        implied_bid = (
+            conv_obs.bidPrice - conv_obs.exportTariff - conv_obs.transportFees - 0.1
+        )
         implied_ask = conv_obs.askPrice + conv_obs.importTariff + conv_obs.transportFees
 
         return implied_bid, implied_ask
@@ -1114,25 +1116,27 @@ class Trader:
         )
         if implied_bid is None or implied_ask is None:
             return orders, buy_order_volume, sell_order_volume
-        
+
         # Calculate foreign mid price
         conv = observation.conversionObservations["MAGNIFICENT_MACARONS"]
         foreign_mid = (conv.bidPrice + conv.askPrice) / 2
-        
+
         # Calculate local mid price if available
         local_mid = None
         if order_depth.buy_orders and order_depth.sell_orders:
             best_bid = max(order_depth.buy_orders.keys())
             best_ask = min(order_depth.sell_orders.keys())
             local_mid = (best_bid + best_ask) / 2
-        
+
         # Calculate available quantities
         buy_quantity = position_limit - position
         sell_quantity = position_limit + position
 
         # Edge calculation - will be more aggressive in low sunlight regime
         edge_factor = 1.5 if self.low_sun_regime else 1.0
-        arb_threshold = 0.5  # Minimum price difference to consider an arbitrage opportunity
+        arb_threshold = (
+            0.5  # Minimum price difference to consider an arbitrage opportunity
+        )
 
         # If in low sun regime, buy aggressively at any price
         if self.low_sun_regime and buy_quantity > 0 and order_depth.sell_orders:
@@ -1144,13 +1148,13 @@ class Trader:
                     orders.append(Order("MAGNIFICENT_MACARONS", price, quantity))
                     buy_order_volume += quantity
                     buy_quantity -= quantity
-                
+
                 # Stop if we've filled our buy quantity
                 if buy_quantity <= 0:
                     break
         else:
             # High sunlight regime - look for arbitrage opportunities
-            
+
             # 1. If local ask price is significantly below the implied bid, buy locally
             if order_depth.sell_orders:
                 best_ask = min(order_depth.sell_orders.keys())
@@ -1161,8 +1165,10 @@ class Trader:
                         orders.append(Order("MAGNIFICENT_MACARONS", best_ask, quantity))
                         buy_order_volume += quantity
                         buy_quantity -= quantity
-                        logger.print(f"MACARONS: Arbitrage BUY at {best_ask}, implied_bid: {implied_bid}")
-            
+                        logger.print(
+                            f"MACARONS: Arbitrage BUY at {best_ask}, implied_bid: {implied_bid}"
+                        )
+
             # 2. If local bid price is significantly above the implied ask, sell locally
             if order_depth.buy_orders:
                 best_bid = max(order_depth.buy_orders.keys())
@@ -1170,41 +1176,62 @@ class Trader:
                     # Profitable to sell locally and import from foreign market
                     quantity = min(abs(order_depth.buy_orders[best_bid]), sell_quantity)
                     if quantity > 0:
-                        orders.append(Order("MAGNIFICENT_MACARONS", best_bid, -quantity))
+                        orders.append(
+                            Order("MAGNIFICENT_MACARONS", best_bid, -quantity)
+                        )
                         sell_order_volume += quantity
                         sell_quantity -= quantity
-                        logger.print(f"MACARONS: Arbitrage SELL at {best_bid}, implied_ask: {implied_ask}")
-            
+                        logger.print(
+                            f"MACARONS: Arbitrage SELL at {best_bid}, implied_ask: {implied_ask}"
+                        )
+
             # 3. Compare market mid prices for broader arbitrage opportunities
-            if local_mid is not None and abs(local_mid - foreign_mid) > 2 * arb_threshold:
+            if (
+                local_mid is not None
+                and abs(local_mid - foreign_mid) > 2 * arb_threshold
+            ):
                 # Local market is significantly mispriced relative to foreign market
                 if local_mid < foreign_mid:
                     # Local market is underpriced - buy locally
                     if order_depth.sell_orders and buy_quantity > 0:
                         for price in sorted(list(order_depth.sell_orders.keys())):
                             if price < foreign_mid - arb_threshold:
-                                quantity = min(abs(order_depth.sell_orders[price]), buy_quantity)
+                                quantity = min(
+                                    abs(order_depth.sell_orders[price]), buy_quantity
+                                )
                                 if quantity > 0:
-                                    orders.append(Order("MAGNIFICENT_MACARONS", price, quantity))
+                                    orders.append(
+                                        Order("MAGNIFICENT_MACARONS", price, quantity)
+                                    )
                                     buy_order_volume += quantity
                                     buy_quantity -= quantity
-                                    logger.print(f"MACARONS: Mid-price Arbitrage BUY at {price}, foreign_mid: {foreign_mid}")
+                                    logger.print(
+                                        f"MACARONS: Mid-price Arbitrage BUY at {price}, foreign_mid: {foreign_mid}"
+                                    )
                             else:
                                 break
                 else:
                     # Local market is overpriced - sell locally
                     if order_depth.buy_orders and sell_quantity > 0:
-                        for price in sorted(list(order_depth.buy_orders.keys()), reverse=True):
+                        for price in sorted(
+                            list(order_depth.buy_orders.keys()), reverse=True
+                        ):
                             if price > foreign_mid + arb_threshold:
-                                quantity = min(abs(order_depth.buy_orders[price]), sell_quantity)
+                                quantity = min(
+                                    abs(order_depth.buy_orders[price]), sell_quantity
+                                )
                                 if quantity > 0:
-                                    orders.append(Order("MAGNIFICENT_MACARONS", price, -quantity))
+                                    orders.append(
+                                        Order("MAGNIFICENT_MACARONS", price, -quantity)
+                                    )
                                     sell_order_volume += quantity
                                     sell_quantity -= quantity
-                                    logger.print(f"MACARONS: Mid-price Arbitrage SELL at {price}, foreign_mid: {foreign_mid}")
+                                    logger.print(
+                                        f"MACARONS: Mid-price Arbitrage SELL at {price}, foreign_mid: {foreign_mid}"
+                                    )
                             else:
                                 break
-            
+
             # 4. Standard take orders based on implied prices (aggressive taking)
             if buy_quantity > 0 and order_depth.sell_orders:
                 for price in sorted(list(order_depth.sell_orders.keys())):
@@ -1237,7 +1264,7 @@ class Trader:
     def macaron_arb_clear(self, position: int, observation: Observation) -> int:
         """
         Calculate how many macarons to import from or export to the foreign island.
-        
+
         Args:
             position: Current position in macarons
             observation: Current market observations
@@ -1246,50 +1273,61 @@ class Trader:
             Number of units to convert (negative = import macarons, positive = export macarons)
             Note: This directly corresponds to the 'conversions' value in the trading interface
         """
+        # Maximum allowed conversion limit
+        MAX_CONVERSION_LIMIT = 10
+        
         # In low sun regime, focus on importing macarons to maintain maximum long position
         if self.low_sun_regime:
             # Only import macarons to clear negative position
             if position < 0:
                 # Negative return value = import macarons from foreign island
-                return -position
+                # Limit to maximum conversion amount
+                return max(-MAX_CONVERSION_LIMIT, -position)
             # Never export macarons in low sun regime
             return 0
-        
+
         # In normal regime, check for arbitrage opportunities from price differences
         if "MAGNIFICENT_MACARONS" in observation.conversionObservations:
             conv = observation.conversionObservations["MAGNIFICENT_MACARONS"]
-            
+
             # Calculate implied prices from foreign market
             implied_bid = conv.bidPrice - conv.exportTariff - conv.transportFees - 0.1
             implied_ask = conv.askPrice + conv.importTariff + conv.transportFees
-            
+
             # Calculate trade profitability
             bid_ask_spread = implied_ask - implied_bid
-            
+
             # Fixed import/export costs (transaction costs, slippage, etc.)
             trade_threshold = 1.0
-            
+
             if position > 0:
                 # If we have positive position (long macarons)
                 # Only export if foreign bid is significantly high (profitable to export)
                 if implied_bid > implied_ask + trade_threshold:
-                    logger.print(f"MACARONS: Profitable export to foreign island. implied_bid: {implied_bid}, implied_ask: {implied_ask}")
-                    return position  # Export all (positive = export)
+                    logger.print(
+                        f"MACARONS: Profitable export to foreign island. implied_bid: {implied_bid}, implied_ask: {implied_ask}"
+                    )
+                    return min(MAX_CONVERSION_LIMIT, position)  # Export all (positive = export), limited to max
                 # If the spread is small, export a portion proportional to size of position
                 elif bid_ask_spread < trade_threshold and position > 10:
-                    return max(1, position // 2)  # Export half of position
+                    return min(MAX_CONVERSION_LIMIT, max(1, position // 2))  # Export half of position, limited to max
             elif position < 0:
                 # If we have negative position (short macarons)
                 # Only import if foreign ask is significantly low (profitable to import)
                 if implied_ask < implied_bid - trade_threshold:
-                    logger.print(f"MACARONS: Profitable import from foreign island. implied_ask: {implied_ask}, implied_bid: {implied_bid}")
-                    return position  # Import all (negative = import)
+                    logger.print(
+                        f"MACARONS: Profitable import from foreign island. implied_ask: {implied_ask}, implied_bid: {implied_bid}"
+                    )
+                    return max(-MAX_CONVERSION_LIMIT, position)  # Import all (negative = import), limited to max
                 # If the spread is small, import a portion proportional to size of position
                 elif bid_ask_spread < trade_threshold and position < -10:
-                    return min(-1, position // 2)  # Import half of position
-        
-        # Default: clear the entire position
-        return -position
+                    return max(-MAX_CONVERSION_LIMIT, min(-1, position // 2))  # Import half of position, limited to max
+
+        # Default: clear the entire position, but limited to conversion limit
+        if position > 0:
+            return min(MAX_CONVERSION_LIMIT, -position)
+        else:
+            return max(-MAX_CONVERSION_LIMIT, -position)
 
     def macaron_arb_make(
         self,
@@ -1322,11 +1360,11 @@ class Trader:
         )
         if implied_bid is None or implied_ask is None:
             return orders, buy_order_volume, sell_order_volume
-        
+
         # Calculate foreign and local mid prices
         conv = observation.conversionObservations["MAGNIFICENT_MACARONS"]
         foreign_mid = (conv.bidPrice + conv.askPrice) / 2
-        
+
         local_mid = None
         if order_depth.buy_orders and order_depth.sell_orders:
             best_bid = max(order_depth.buy_orders.keys())
@@ -1346,26 +1384,28 @@ class Trader:
                     # No sell orders available, need to place competitive bid
                     # Use highest bid and add 1 to be competitive, or implied bid + edge
                     edge = self.macaron_edge * 1.5  # Larger edge in low sun regime
-                    
+
                     if order_depth.buy_orders:
                         best_bid = max(order_depth.buy_orders.keys())
                         bid = best_bid + 1  # Outbid existing orders
                     else:
                         # No existing orders, use implied price + premium
                         bid = implied_bid + edge
-                    
+
                     # Place aggressive buy order
-                    orders.append(Order("MAGNIFICENT_MACARONS", round(bid), buy_quantity))
-            
+                    orders.append(
+                        Order("MAGNIFICENT_MACARONS", round(bid), buy_quantity)
+                    )
+
             # No sell orders in low sun regime - maintain maximum long position
-            
+
         else:
             # High sunlight regime - market making with arbitrage awareness
-            
+
             # Calculate base edge
             edge = self.macaron_edge * 1.0
             arb_threshold = 0.5  # Same as in take function
-            
+
             # Adjust market making prices based on foreign-local mid price difference
             # This helps align our orders with potential arbitrage opportunities
             price_adjustment = 0
@@ -1373,21 +1413,27 @@ class Trader:
                 mid_diff = foreign_mid - local_mid
                 # If difference is significant, adjust our prices to capitalize on it
                 if abs(mid_diff) > arb_threshold:
-                    price_adjustment = mid_diff * 0.5  # Partial adjustment toward foreign mid
-                    logger.print(f"MACARONS: Market making price adjustment: {price_adjustment:.2f} based on mid diff: {mid_diff:.2f}")
-            
+                    price_adjustment = (
+                        mid_diff * 0.5
+                    )  # Partial adjustment toward foreign mid
+                    logger.print(
+                        f"MACARONS: Market making price adjustment: {price_adjustment:.2f} based on mid diff: {mid_diff:.2f}"
+                    )
+
             # Calculate bid and ask prices with adjustments
             bid = implied_bid - edge + price_adjustment
             ask = implied_ask + edge + price_adjustment
-            
+
             # Get bid/ask from observation for competitive pricing
             aggressive_ask = None
-            
+
             # If foreign market has a significantly better bid than our implied price
             if conv.bidPrice > implied_bid + arb_threshold:
                 # We can be more aggressive with our ask price
                 aggressive_ask = conv.bidPrice - 1.0
-                logger.print(f"MACARONS: Using aggressive ask {aggressive_ask} based on foreign bidPrice {conv.bidPrice}")
+                logger.print(
+                    f"MACARONS: Using aggressive ask {aggressive_ask} based on foreign bidPrice {conv.bidPrice}"
+                )
 
             # Use aggressive ask if it's profitable
             min_edge = 0.5  # Minimum acceptable edge
@@ -1440,20 +1486,26 @@ class Trader:
             obs = state.observations
             if "MAGNIFICENT_MACARONS" in obs.conversionObservations:
                 # Get current sunlight index directly from observation
-                current_sun = obs.conversionObservations["MAGNIFICENT_MACARONS"].sunlightIndex
+                current_sun = obs.conversionObservations[
+                    "MAGNIFICENT_MACARONS"
+                ].sunlightIndex
                 previous_regime = self.low_sun_regime
-                
+
                 # Simple check against threshold
                 if current_sun < self.CSI_threshold:
                     self.low_sun_regime = True
                 else:
                     self.low_sun_regime = False
-                
+
                 # Log the sunlight regime
                 if previous_regime != self.low_sun_regime:
-                    logger.print(f"SUNLIGHT REGIME CHANGE: {'LOW' if self.low_sun_regime else 'HIGH'} sun regime. Current CSI: {current_sun:.2f}, Threshold: {self.CSI_threshold}")
+                    logger.print(
+                        f"SUNLIGHT REGIME CHANGE: {'LOW' if self.low_sun_regime else 'HIGH'} sun regime. Current CSI: {current_sun:.2f}, Threshold: {self.CSI_threshold}"
+                    )
                 else:
-                    logger.print(f"SUNLIGHT STATUS: {'LOW' if self.low_sun_regime else 'HIGH'} sun regime. Current CSI: {current_sun:.2f}, Threshold: {self.CSI_threshold}")
+                    logger.print(
+                        f"SUNLIGHT STATUS: {'LOW' if self.low_sun_regime else 'HIGH'} sun regime. Current CSI: {current_sun:.2f}, Threshold: {self.CSI_threshold}"
+                    )
             else:
                 self.low_sun_regime = False
 
@@ -1493,10 +1545,16 @@ class Trader:
                 mac_order_depth = state.order_depths["MAGNIFICENT_MACARONS"]
 
                 # Log current state for debugging
-                logger.print(f"MACARONS: Current position: {mac_position}, Low sun regime: {self.low_sun_regime}")
+                logger.print(
+                    f"MACARONS: Current position: {mac_position}, Low sun regime: {self.low_sun_regime}"
+                )
                 if "MAGNIFICENT_MACARONS" in obs.conversionObservations:
-                    csi = obs.conversionObservations["MAGNIFICENT_MACARONS"].sunlightIndex
-                    logger.print(f"MACARONS: CSI: {csi}, Threshold: {self.CSI_threshold}")
+                    csi = obs.conversionObservations[
+                        "MAGNIFICENT_MACARONS"
+                    ].sunlightIndex
+                    logger.print(
+                        f"MACARONS: CSI: {csi}, Threshold: {self.CSI_threshold}"
+                    )
 
                 # Call the arbitrage take method
                 mac_take_orders, buy_volume, sell_volume = self.macaron_arb_take(
@@ -1505,7 +1563,9 @@ class Trader:
 
                 # Log take orders
                 if mac_take_orders:
-                    logger.print(f"MACARONS: Generated {len(mac_take_orders)} take orders: {mac_take_orders}")
+                    logger.print(
+                        f"MACARONS: Generated {len(mac_take_orders)} take orders: {mac_take_orders}"
+                    )
 
                 # Call the arbitrage make method
                 mac_make_orders, _, _ = self.macaron_arb_make(
@@ -1514,7 +1574,9 @@ class Trader:
 
                 # Log make orders
                 if mac_make_orders:
-                    logger.print(f"MACARONS: Generated {len(mac_make_orders)} make orders: {mac_make_orders}")
+                    logger.print(
+                        f"MACARONS: Generated {len(mac_make_orders)} make orders: {mac_make_orders}"
+                    )
 
                 # If we have orders to execute, clear the position and send orders
                 if mac_take_orders or mac_make_orders:
@@ -1525,7 +1587,9 @@ class Trader:
 
                     # Combine all orders
                     result["MAGNIFICENT_MACARONS"] = mac_take_orders + mac_make_orders
-                    logger.print(f"MACARONS: Added {len(result['MAGNIFICENT_MACARONS'])} orders to result")
+                    logger.print(
+                        f"MACARONS: Added {len(result['MAGNIFICENT_MACARONS'])} orders to result"
+                    )
 
                     # Track fill history for adaptive edge
                     new_fills = sum(
@@ -1551,7 +1615,9 @@ class Trader:
                         if self.low_sun_regime:
                             # In low sun regime, be extremely aggressive with edge
                             self.macaron_edge = max(0.1, self.macaron_edge * 0.8)
-                            logger.print(f"MACARONS: In low sun regime, reduced edge to {self.macaron_edge}")
+                            logger.print(
+                                f"MACARONS: In low sun regime, reduced edge to {self.macaron_edge}"
+                            )
                         else:
                             if avg_fill > self.macaron_target_vol * 1.5:
                                 # Too many fills, increase edge
@@ -1559,7 +1625,9 @@ class Trader:
                             elif avg_fill < self.macaron_target_vol * 0.5:
                                 # Too few fills, decrease edge
                                 self.macaron_edge = max(0.5, self.macaron_edge * 0.9)
-                            logger.print(f"MACARONS: Normal regime, adjusted edge to {self.macaron_edge}")
+                            logger.print(
+                                f"MACARONS: Normal regime, adjusted edge to {self.macaron_edge}"
+                            )
 
             handled = set()
             if "MAGNIFICENT_MACARONS" in result:
