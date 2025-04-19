@@ -158,7 +158,12 @@ class Trader:
             "PICNIC_BASKET1": True,
             "PICNIC_BASKET2": True,
             "VOLCANIC_ROCK": True,
-            "MAGNIFICENT_MACARONS": True,
+            "VOLCANIC_ROCK_VOUCHER_9500": True,
+            "VOLCANIC_ROCK_VOUCHER_9750": True,
+            "VOLCANIC_ROCK_VOUCHER_10000": True,
+            "VOLCANIC_ROCK_VOUCHER_10250": True,
+            "VOLCANIC_ROCK_VOUCHER_10500": True,
+            "MAGNIFICENT_MACARONS": False,
         }
         self.position_limits = {
             "KELP": 50,
@@ -1732,21 +1737,33 @@ class Trader:
                             try:
                                 voucher_position = state.position.get(voucher_symbol, 0)
                                 voucher_positions[voucher_symbol] = voucher_position
-                                take_orders, make_orders = (
-                                    self.volcanic_rock_voucher_orders(
-                                        state,
-                                        rock_order_depth,
-                                        rock_position,
-                                        voucher_symbol,
-                                        state.order_depths[voucher_symbol],
-                                        voucher_position,
-                                        trader_data,
+                                
+                                # Only generate orders if the voucher is active
+                                if self.active_products.get(voucher_symbol, False):
+                                    take_orders, make_orders = (
+                                        self.volcanic_rock_voucher_orders(
+                                            state,
+                                            rock_order_depth,
+                                            rock_position,
+                                            voucher_symbol,
+                                            state.order_depths[voucher_symbol],
+                                            voucher_position,
+                                            trader_data,
+                                        )
                                     )
-                                )
-                                if take_orders or make_orders:
-                                    result.setdefault(voucher_symbol, []).extend(
-                                        take_orders + make_orders
+                                    if take_orders or make_orders:
+                                        result.setdefault(voucher_symbol, []).extend(
+                                            take_orders + make_orders
+                                        )
+                                # If inactive but has position, try to close it
+                                elif voucher_position != 0:
+                                    close_orders = self.close_position(
+                                        voucher_symbol, 
+                                        state.order_depths[voucher_symbol], 
+                                        voucher_position
                                     )
+                                    if close_orders:
+                                        result.setdefault(voucher_symbol, []).extend(close_orders)
                             except Exception as e:
                                 logger.print(
                                     f"Error processing voucher {voucher_symbol}: {e}"
@@ -1795,37 +1812,75 @@ class Trader:
             for product in state.order_depths.keys():
                 if product in handled:
                     continue
+                
+                position = state.position.get(product, 0)
+                
                 if product in ["PICNIC_BASKET1", "PICNIC_BASKET2"]:
-                    arbitrage_orders = self.execute_basket_arbitrage(state, product)
-                    if not arbitrage_orders or product not in arbitrage_orders:
-                        synthetic_value = self.calculate_synthetic_value(state, product)
-                        position = state.position.get(product, 0)
-                        orders = self.trade_basket_divergence(
-                            product,
-                            state.order_depths[product],
-                            position,
-                            synthetic_value,
+                    # Always calculate synthetic values for baskets
+                    synthetic_value = self.calculate_synthetic_value(state, product)
+                    
+                    # Only execute trades if the product is active
+                    if self.active_products.get(product, False):
+                        arbitrage_orders = self.execute_basket_arbitrage(state, product)
+                        if not arbitrage_orders or product not in arbitrage_orders:
+                            orders = self.trade_basket_divergence(
+                                product,
+                                state.order_depths[product],
+                                position,
+                                synthetic_value,
+                            )
+                            if orders:
+                                result[product] = orders
+                        else:
+                            for p, orders in arbitrage_orders.items():
+                                # Only add orders for active products
+                                if self.active_products.get(p, False):
+                                    result.setdefault(p, []).extend(orders)
+                
+                elif product in ["KELP", "RAINFOREST_RESIN", "SQUID_INK", "CROISSANTS", "JAMS", "DJEMBES"]:
+                    # Always perform calculations
+                    if product == "KELP":
+                        self.kelp_prices.append(self.calculate_fair_value(state.order_depths[product]) or 0)
+                        if len(self.kelp_prices) > self.timespan:
+                            self.kelp_prices.pop(0)
+                    elif product == "RAINFOREST_RESIN":
+                        self.resin_prices.append(self.calculate_fair_value(state.order_depths[product]) or 0)
+                        if len(self.resin_prices) > self.timespan:
+                            self.resin_prices.pop(0)
+                    
+                    # Only execute trades if the product is active
+                    if self.active_products.get(product, False):
+                        orders = self.product_orders(
+                            product, state.order_depths[product], position
                         )
                         if orders:
                             result[product] = orders
-                    else:
-                        for p, orders in arbitrage_orders.items():
-                            result.setdefault(p, []).extend(orders)
+                
+                # Handle vouchers - check separately since they have different names
+                elif product.startswith("VOLCANIC_ROCK_VOUCHER_"):
+                    # Only execute trades if the product is active
+                    if self.active_products.get(product, False):
+                        if position != 0:
+                            orders = self.close_position(
+                                product, state.order_depths[product], position
+                            )
+                            if orders:
+                                result[product] = orders
+                
                 elif product in self.active_products and self.active_products[product]:
-                    position = state.position.get(product, 0)
                     orders = self.product_orders(
                         product, state.order_depths[product], position
                     )
                     if orders:
                         result[product] = orders
-                else:
-                    position = state.position.get(product, 0)
-                    if position != 0:
-                        orders = self.close_position(
-                            product, state.order_depths[product], position
-                        )
-                        if orders:
-                            result[product] = orders
+                
+                # For inactive products with positions, close the positions
+                elif position != 0:
+                    orders = self.close_position(
+                        product, state.order_depths[product], position
+                    )
+                    if orders:
+                        result[product] = orders
 
             trader_data["past_volatilities"] = self.past_volatilities
             serialized_trader_data = jsonpickle.encode(trader_data)
