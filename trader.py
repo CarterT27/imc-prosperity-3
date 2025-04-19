@@ -232,12 +232,11 @@ class Trader:
         self.macaron_edge = 1.0
         self.macaron_target_vol = 10
         self.macaron_fill_history: list[int] = []
-        self.CSI_window = 100
-        self.CSI_percentile = 0.20
-        self.CSI_history: list[float] = []
+        self.CSI_threshold = 50  # Threshold for determining low/high sunlight regime
         self.low_sun_regime = False
         self.timespan = 20
         self.cache: dict[str, float] = {}
+        self.macaron_min_buy_quantity = 20  # Minimum buy quantity in low sun regime
 
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         try:
@@ -1064,6 +1063,251 @@ class Trader:
         days_remaining = max(0, 6 - current_day)  # Assuming 7-day expiry from day 0
         return days_remaining / 365.0
 
+    def calculate_implied_bid_ask(
+        self, observation: Observation, product: str
+    ) -> tuple[float, float]:
+        """
+        Calculate the implied bid and ask prices for a product with conversion observations.
+
+        For MAGNIFICENT_MACARONS:
+        - Implied bid = sugar_price - exportTariff - transportFees - 0.1
+        - Implied ask = sugar_price + importTariff + transportFees
+
+        This mirrors the implementation from the orchids_implied_bid_ask method in round_2_v3.py
+        """
+        if product not in observation.conversionObservations:
+            return None, None
+
+        conv_obs = observation.conversionObservations[product]
+
+        implied_bid = (
+            conv_obs.sugarPrice - conv_obs.exportTariff - conv_obs.transportFees - 0.1
+        )
+        implied_ask = (
+            conv_obs.sugarPrice + conv_obs.importTariff + conv_obs.transportFees
+        )
+
+        return implied_bid, implied_ask
+
+    def macaron_arb_take(
+        self, order_depth: OrderDepth, observation: Observation, position: int
+    ) -> tuple[list[Order], int, int]:
+        """
+        Execute arbitrage take orders for Magnificent Macarons.
+        Takes advantage of mispriced orders relative to implied values.
+
+        Args:
+            order_depth: Current order depth for macarons
+            observation: Current market observations
+            position: Current position in macarons
+
+        Returns:
+            Tuple of (list of orders, buy volume, sell volume)
+        """
+        orders = []
+        position_limit = self.position_limits["MAGNIFICENT_MACARONS"]
+        buy_order_volume = 0
+        sell_order_volume = 0
+
+        # Calculate implied prices
+        implied_bid, implied_ask = self.calculate_implied_bid_ask(
+            observation, "MAGNIFICENT_MACARONS"
+        )
+        if implied_bid is None or implied_ask is None:
+            return orders, buy_order_volume, sell_order_volume
+
+        # Calculate available quantities
+        buy_quantity = position_limit - position
+        sell_quantity = position_limit + position
+
+        # Calculate edge for aggressive taking
+        conv = observation.conversionObservations["MAGNIFICENT_MACARONS"]
+        foreign_mid = (conv.sugarPrice * 2) / 2  # Simplified mid price
+
+        # Edge calculation - will be more aggressive in low sunlight regime
+        make_probability = 0.5  # Probability parameter similar to orchids
+        edge_factor = 1.5 if self.low_sun_regime else 1.0
+
+        # If in low sun regime, buy aggressively at any price
+        if self.low_sun_regime and buy_quantity > 0 and order_depth.sell_orders:
+            # Sort sell orders by price (lowest first)
+            for price in sorted(list(order_depth.sell_orders.keys())):
+                # Take all available sell orders to maximize long position
+                quantity = min(abs(order_depth.sell_orders[price]), buy_quantity)
+                if quantity > 0:
+                    orders.append(Order("MAGNIFICENT_MACARONS", price, quantity))
+                    buy_order_volume += quantity
+                    buy_quantity -= quantity
+                
+                # Stop if we've filled our buy quantity
+                if buy_quantity <= 0:
+                    break
+        else:
+            # Normal regime - only take underpriced sell orders
+            for price in sorted(list(order_depth.sell_orders.keys())):
+                # Stop if price is too high relative to implied bid
+                if price > implied_bid - self.macaron_edge * edge_factor:
+                    break
+
+                # Take the order if it's below our threshold
+                quantity = min(abs(order_depth.sell_orders[price]), buy_quantity)
+                if quantity > 0:
+                    orders.append(Order("MAGNIFICENT_MACARONS", price, quantity))
+                    buy_order_volume += quantity
+
+        # Take overpriced buy orders ONLY IF NOT in low sun regime
+        if not self.low_sun_regime:
+            for price in sorted(list(order_depth.buy_orders.keys()), reverse=True):
+                # Stop if price is too low relative to implied ask
+                if price < implied_ask + self.macaron_edge * edge_factor:
+                    break
+
+                # Take the order if it's above our threshold
+                quantity = min(abs(order_depth.buy_orders[price]), sell_quantity)
+                if quantity > 0:
+                    orders.append(Order("MAGNIFICENT_MACARONS", price, -quantity))
+                    sell_order_volume += quantity
+
+        return orders, buy_order_volume, sell_order_volume
+
+    def macaron_arb_clear(self, position: int) -> int:
+        """
+        Calculate how many macarons to convert to/from sugar.
+        Negative position means we owe macarons, so we convert sugar to macarons.
+        Positive position means we have excess macarons, so we convert to sugar.
+
+        Args:
+            position: Current position in macarons
+
+        Returns:
+            Number of units to convert (negative = convert to macarons, positive = convert to sugar)
+        """
+        # In low sun regime, never convert macarons to sugar (maintain maximum long position)
+        if self.low_sun_regime:
+            # Only convert sugar to macarons to clear negative position
+            if position < 0:
+                return -position  # Convert sugar to macarons to clear negative position
+            # Never convert positive positions to sugar in low sun regime
+            return 0
+            
+        # In normal regime, clear the entire position
+        return -position
+
+    def macaron_arb_make(
+        self,
+        order_depth: OrderDepth,
+        observation: Observation,
+        position: int,
+        buy_order_volume: int,
+        sell_order_volume: int,
+    ) -> tuple[list[Order], int, int]:
+        """
+        Place market making orders for Magnificent Macarons.
+        Uses implied prices to determine where to place orders.
+
+        Args:
+            order_depth: Current order depth for macarons
+            observation: Current market observations
+            position: Current position in macarons
+            buy_order_volume: Volume already being bought from take orders
+            sell_order_volume: Volume already being sold from take orders
+
+        Returns:
+            Tuple of (list of orders, buy volume, sell volume)
+        """
+        orders = []
+        position_limit = self.position_limits["MAGNIFICENT_MACARONS"]
+
+        # Calculate implied prices
+        implied_bid, implied_ask = self.calculate_implied_bid_ask(
+            observation, "MAGNIFICENT_MACARONS"
+        )
+        if implied_bid is None or implied_ask is None:
+            return orders, buy_order_volume, sell_order_volume
+
+        # In low sun regime, adjust strategy to maximize long position
+        if self.low_sun_regime:
+            buy_quantity = position_limit - (position + buy_order_volume)
+            if buy_quantity > 0:
+                # Get current best ask price if available
+                if order_depth.sell_orders:
+                    best_ask = min(order_depth.sell_orders.keys())
+                    # Place order at best ask to ensure execution
+                    orders.append(Order("MAGNIFICENT_MACARONS", best_ask, buy_quantity))
+                else:
+                    # No sell orders available, need to place competitive bid
+                    # Use highest bid and add 1 to be competitive, or implied bid + edge
+                    edge = self.macaron_edge * 1.5  # Larger edge in low sun regime
+                    
+                    if order_depth.buy_orders:
+                        best_bid = max(order_depth.buy_orders.keys())
+                        bid = best_bid + 1  # Outbid existing orders
+                    else:
+                        # No existing orders, use implied price + premium
+                        bid = implied_bid + edge
+                    
+                    # Place aggressive buy order
+                    orders.append(Order("MAGNIFICENT_MACARONS", round(bid), buy_quantity))
+            
+            # No sell orders in low sun regime - maintain maximum long position
+            
+        else:
+            # Adjust edge based on sunlight regime
+            edge = self.macaron_edge * 1.0  # Normal edge in high sun regime
+
+            # Calculate bid and ask prices
+            bid = implied_bid - edge
+            ask = implied_ask + edge
+
+            # Get sugar price for aggressive pricing
+            conv = observation.conversionObservations["MAGNIFICENT_MACARONS"]
+            sugar_price = conv.sugarPrice
+
+            # Calculate aggressive ask price (similar to orchids strategy)
+            aggressive_ask = sugar_price - 1.6
+
+            # Use aggressive ask if it's profitable
+            min_edge = 0.5  # Minimum acceptable edge
+            if aggressive_ask >= implied_ask + min_edge:
+                ask = aggressive_ask
+
+            # Filter large orders to avoid adverse selection
+            min_order_size = 20  # Minimum size threshold to consider an order large
+            filtered_ask = [
+                price
+                for price in order_depth.sell_orders.keys()
+                if abs(order_depth.sell_orders[price]) >= min_order_size
+            ]
+            filtered_bid = [
+                price
+                for price in order_depth.buy_orders.keys()
+                if abs(order_depth.buy_orders[price]) >= min_order_size
+            ]
+
+            # If we're not the best price, penny the current best (if profitable)
+            if filtered_ask and ask > min(filtered_ask):
+                if min(filtered_ask) - 1 > implied_ask:
+                    ask = min(filtered_ask) - 1
+                else:
+                    ask = implied_ask + edge
+
+            if filtered_bid and bid < max(filtered_bid):
+                if max(filtered_bid) + 1 < implied_bid:
+                    bid = max(filtered_bid) + 1
+                else:
+                    bid = implied_bid - edge
+
+            # Normal market making in high sun regime
+            buy_quantity = position_limit - (position + buy_order_volume)
+            if buy_quantity > 0:
+                orders.append(Order("MAGNIFICENT_MACARONS", round(bid), buy_quantity))
+
+            sell_quantity = position_limit + (position - sell_order_volume)
+            if sell_quantity > 0:
+                orders.append(Order("MAGNIFICENT_MACARONS", round(ask), -sell_quantity))
+
+        return orders, buy_order_volume, sell_order_volume
+
     def run(self, state: TradingState) -> tuple[dict[str, list[Order]], int, str]:
         try:
             result = {}
@@ -1072,62 +1316,131 @@ class Trader:
 
             obs = state.observations
             if "MAGNIFICENT_MACARONS" in obs.conversionObservations:
-                sun = obs.conversionObservations["MAGNIFICENT_MACARONS"].sunlightIndex
-                self.CSI_history.append(sun)
-                if len(self.CSI_history) > self.CSI_window:
-                    self.CSI_history.pop(0)
-                csi_thresh = np.percentile(self.CSI_history, 100 * self.CSI_percentile)
-                self.low_sun_regime = len(self.CSI_history) >= 5 and all(x < csi_thresh for x in self.CSI_history[-5:])
+                # Get current sunlight index directly from observation
+                current_sun = obs.conversionObservations["MAGNIFICENT_MACARONS"].sunlightIndex
+                previous_regime = self.low_sun_regime
+                
+                # Simple check against threshold
+                if current_sun < self.CSI_threshold:
+                    self.low_sun_regime = True
+                else:
+                    self.low_sun_regime = False
+                
+                # Log the sunlight regime
+                if previous_regime != self.low_sun_regime:
+                    logger.print(f"SUNLIGHT REGIME CHANGE: {'LOW' if self.low_sun_regime else 'HIGH'} sun regime. Current CSI: {current_sun:.2f}, Threshold: {self.CSI_threshold}")
+                else:
+                    logger.print(f"SUNLIGHT STATUS: {'LOW' if self.low_sun_regime else 'HIGH'} sun regime. Current CSI: {current_sun:.2f}, Threshold: {self.CSI_threshold}")
             else:
                 self.low_sun_regime = False
-            
+
             current_day = state.timestamp // 1000000
             if current_day != self.current_day:
                 self.daily_pnl = 0
                 self.current_day = current_day
-            
+
             # Update days_to_expiry based on current timestamp
             days_remaining = max(0, 7 - current_day)
             self.days_to_expiry = days_remaining
-            
+
             if state.traderData and state.traderData != "SAMPLE":
                 try:
                     trader_data = jsonpickle.decode(state.traderData)
                     if "past_volatilities" in trader_data:
                         self.past_volatilities = trader_data["past_volatilities"]
-                    for prod in ["kelp", "resin", "squid_ink", "croissants", "jams", "djembes"]:
+                    for prod in [
+                        "kelp",
+                        "resin",
+                        "squid_ink",
+                        "croissants",
+                        "jams",
+                        "djembes",
+                    ]:
                         if f"{prod}_prices" in trader_data:
-                            setattr(self, f"{prod}_prices", trader_data[f"{prod}_prices"])
+                            setattr(
+                                self, f"{prod}_prices", trader_data[f"{prod}_prices"]
+                            )
                         if f"{prod}_vwap" in trader_data:
                             setattr(self, f"{prod}_vwap", trader_data[f"{prod}_vwap"])
                 except Exception as e:
                     logger.print(f"Could not parse trader data: {e}")
 
             if "MAGNIFICENT_MACARONS" in state.order_depths:
-                od = state.order_depths["MAGNIFICENT_MACARONS"]
-                mac_mid = self.calculate_fair_value(od)
-                sugar_od = state.order_depths.get("SUGAR")
-                if mac_mid is not None and sugar_od:
-                    sugar_mid = self.calculate_fair_value(sugar_od)
-                    conv = obs.conversionObservations["MAGNIFICENT_MACARONS"]
-                    synth_ask = sugar_mid + conv.transportFees + conv.importTariff
-                    synth_bid = sugar_mid - (conv.transportFees + conv.exportTariff)
-                    best_ask = min(od.sell_orders) if od.sell_orders else None
-                    best_bid = max(od.buy_orders) if od.buy_orders else None
-                    edge = self.macaron_edge * (1.5 if self.low_sun_regime else 1.0)
+                mac_position = state.position.get("MAGNIFICENT_MACARONS", 0)
+                mac_order_depth = state.order_depths["MAGNIFICENT_MACARONS"]
 
-                    if best_ask is not None and synth_bid > best_ask + edge:
-                        qty = min(-od.sell_orders[best_ask],
-                                self.position_limits["MAGNIFICENT_MACARONS"] - state.position.get("MAGNIFICENT_MACARONS", 0))
-                        if qty > 0:
-                            result.setdefault("MAGNIFICENT_MACARONS", []).append(Order("MAGNIFICENT_MACARONS", best_ask, qty))
-                    elif best_bid is not None and synth_ask < best_bid - edge:
-                        qty = min(od.buy_orders[best_bid],
-                                self.position_limits["MAGNIFICENT_MACARONS"] + state.position.get("MAGNIFICENT_MACARONS", 0))
-                        if qty > 0:
-                            result.setdefault("MAGNIFICENT_MACARONS", []).append(Order("MAGNIFICENT_MACARONS", best_bid, -qty))
-                       
+                # Log current state for debugging
+                logger.print(f"MACARONS: Current position: {mac_position}, Low sun regime: {self.low_sun_regime}")
+                if "MAGNIFICENT_MACARONS" in obs.conversionObservations:
+                    csi = obs.conversionObservations["MAGNIFICENT_MACARONS"].sunlightIndex
+                    logger.print(f"MACARONS: CSI: {csi}, Threshold: {self.CSI_threshold}")
+
+                # Call the arbitrage take method
+                mac_take_orders, buy_volume, sell_volume = self.macaron_arb_take(
+                    mac_order_depth, obs, mac_position
+                )
+
+                # Log take orders
+                if mac_take_orders:
+                    logger.print(f"MACARONS: Generated {len(mac_take_orders)} take orders: {mac_take_orders}")
+
+                # Call the arbitrage make method
+                mac_make_orders, _, _ = self.macaron_arb_make(
+                    mac_order_depth, obs, mac_position, buy_volume, sell_volume
+                )
+
+                # Log make orders
+                if mac_make_orders:
+                    logger.print(f"MACARONS: Generated {len(mac_make_orders)} make orders: {mac_make_orders}")
+
+                # If we have orders to execute, clear the position and send orders
+                if mac_take_orders or mac_make_orders:
+                    # Convert existing position to bring it back to zero
+                    # In low sun regime, maintain maximum long position
+                    conversions = self.macaron_arb_clear(mac_position)
+                    logger.print(f"MACARONS: Conversion quantity: {conversions}")
+
+                    # Combine all orders
+                    result["MAGNIFICENT_MACARONS"] = mac_take_orders + mac_make_orders
+                    logger.print(f"MACARONS: Added {len(result['MAGNIFICENT_MACARONS'])} orders to result")
+
+                    # Track fill history for adaptive edge
+                    new_fills = sum(
+                        order.quantity
+                        for order in mac_take_orders
+                        if order.quantity > 0
+                    )
+                    new_fills += sum(
+                        -order.quantity
+                        for order in mac_take_orders
+                        if order.quantity < 0
+                    )
+                    if new_fills > 0:
+                        self.macaron_fill_history.append(new_fills)
+                        if len(self.macaron_fill_history) > 10:  # Keep last 10 fills
+                            self.macaron_fill_history.pop(0)
+
+                    # Adjust edge based on fill history
+                    if len(self.macaron_fill_history) >= 5:
+                        avg_fill = sum(self.macaron_fill_history) / len(
+                            self.macaron_fill_history
+                        )
+                        if self.low_sun_regime:
+                            # In low sun regime, be extremely aggressive with edge
+                            self.macaron_edge = max(0.1, self.macaron_edge * 0.8)
+                            logger.print(f"MACARONS: In low sun regime, reduced edge to {self.macaron_edge}")
+                        else:
+                            if avg_fill > self.macaron_target_vol * 1.5:
+                                # Too many fills, increase edge
+                                self.macaron_edge = min(2.0, self.macaron_edge * 1.1)
+                            elif avg_fill < self.macaron_target_vol * 0.5:
+                                # Too few fills, decrease edge
+                                self.macaron_edge = max(0.5, self.macaron_edge * 0.9)
+                            logger.print(f"MACARONS: Normal regime, adjusted edge to {self.macaron_edge}")
+
             handled = set()
+            if "MAGNIFICENT_MACARONS" in result:
+                handled.add("MAGNIFICENT_MACARONS")
 
             # Handle vouchers and VOLCANIC_ROCK
             if "VOLCANIC_ROCK" in state.order_depths:
@@ -1144,47 +1457,59 @@ class Trader:
                             try:
                                 voucher_position = state.position.get(voucher_symbol, 0)
                                 voucher_positions[voucher_symbol] = voucher_position
-                                take_orders, make_orders = self.volcanic_rock_voucher_orders(
-                                    state,
-                                    rock_order_depth,
-                                    rock_position,
-                                    voucher_symbol,
-                                    state.order_depths[voucher_symbol],
-                                    voucher_position,
-                                    trader_data
+                                take_orders, make_orders = (
+                                    self.volcanic_rock_voucher_orders(
+                                        state,
+                                        rock_order_depth,
+                                        rock_position,
+                                        voucher_symbol,
+                                        state.order_depths[voucher_symbol],
+                                        voucher_position,
+                                        trader_data,
+                                    )
                                 )
                                 if take_orders or make_orders:
-                                    result.setdefault(voucher_symbol, []).extend(take_orders + make_orders)
+                                    result.setdefault(voucher_symbol, []).extend(
+                                        take_orders + make_orders
+                                    )
                             except Exception as e:
-                                logger.print(f"Error processing voucher {voucher_symbol}: {e}")
+                                logger.print(
+                                    f"Error processing voucher {voucher_symbol}: {e}"
+                                )
 
                 # Only trade VOLCANIC_ROCK if it's active
                 if self.active_products.get("VOLCANIC_ROCK", False):
                     if rock_mid is not None:
-                        arbitrage_orders = self.find_arbitrage_opportunities(state, rock_order_depth, rock_mid)
+                        arbitrage_orders = self.find_arbitrage_opportunities(
+                            state, rock_order_depth, rock_mid
+                        )
                         if arbitrage_orders:
                             for order in arbitrage_orders:
                                 result.setdefault(order.symbol, []).append(order)
-                    
+
                     if voucher_deltas:
                         try:
                             hedge_orders = self.volcanic_rock_hedge_orders(
                                 rock_order_depth,
                                 rock_position,
                                 voucher_positions,
-                                voucher_deltas
+                                voucher_deltas,
                             )
                             if hedge_orders:
                                 result["VOLCANIC_ROCK"] = hedge_orders
                         except Exception as e:
                             logger.print(f"Error generating hedge orders: {e}")
-                    
-                    vol_orders = self.volcanic_rock_orders(rock_order_depth, rock_position, state)
+
+                    vol_orders = self.volcanic_rock_orders(
+                        rock_order_depth, rock_position, state
+                    )
                     if vol_orders:
                         result.setdefault("VOLCANIC_ROCK", []).extend(vol_orders)
                 # If VOLCANIC_ROCK is not active but we have a position, close it
                 elif rock_position != 0:
-                    orders = self.close_position("VOLCANIC_ROCK", rock_order_depth, rock_position)
+                    orders = self.close_position(
+                        "VOLCANIC_ROCK", rock_order_depth, rock_position
+                    )
                     if orders:
                         result["VOLCANIC_ROCK"] = orders
 
@@ -1200,7 +1525,12 @@ class Trader:
                     if not arbitrage_orders or product not in arbitrage_orders:
                         synthetic_value = self.calculate_synthetic_value(state, product)
                         position = state.position.get(product, 0)
-                        orders = self.trade_basket_divergence(product, state.order_depths[product], position, synthetic_value)
+                        orders = self.trade_basket_divergence(
+                            product,
+                            state.order_depths[product],
+                            position,
+                            synthetic_value,
+                        )
                         if orders:
                             result[product] = orders
                     else:
@@ -1208,13 +1538,17 @@ class Trader:
                             result.setdefault(p, []).extend(orders)
                 elif product in self.active_products and self.active_products[product]:
                     position = state.position.get(product, 0)
-                    orders = self.product_orders(product, state.order_depths[product], position)
+                    orders = self.product_orders(
+                        product, state.order_depths[product], position
+                    )
                     if orders:
                         result[product] = orders
                 else:
                     position = state.position.get(product, 0)
                     if position != 0:
-                        orders = self.close_position(product, state.order_depths[product], position)
+                        orders = self.close_position(
+                            product, state.order_depths[product], position
+                        )
                         if orders:
                             result[product] = orders
 
