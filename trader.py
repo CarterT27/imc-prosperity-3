@@ -163,7 +163,7 @@ class Trader:
             "VOLCANIC_ROCK_VOUCHER_10000": True,
             "VOLCANIC_ROCK_VOUCHER_10250": True,
             "VOLCANIC_ROCK_VOUCHER_10500": True,
-            "MAGNIFICENT_MACARONS": False,
+            "MAGNIFICENT_MACARONS": True,
         }
         self.position_limits = {
             "KELP": 50,
@@ -1635,7 +1635,7 @@ class Trader:
 
                 # Log current state for debugging
                 logger.print(
-                    f"MACARONS: Current position: {mac_position}, Low sun regime: {self.low_sun_regime}"
+                    f"MACARONS: Current position: {mac_position}, Low sun regime: {self.low_sun_regime}, Active: {self.active_products.get('MAGNIFICENT_MACARONS', False)}"
                 )
                 if "MAGNIFICENT_MACARONS" in obs.conversionObservations:
                     csi = obs.conversionObservations[
@@ -1645,78 +1645,90 @@ class Trader:
                         f"MACARONS: CSI: {csi}, Threshold: {self.CSI_threshold}"
                     )
 
-                # Call the arbitrage take method
-                mac_take_orders, buy_volume, sell_volume = self.macaron_arb_take(
-                    mac_order_depth, obs, mac_position
-                )
-
-                # Log take orders
-                if mac_take_orders:
-                    logger.print(
-                        f"MACARONS: Generated {len(mac_take_orders)} take orders: {mac_take_orders}"
+                # Only trade if the product is active
+                if self.active_products.get("MAGNIFICENT_MACARONS", False):
+                    # Call the arbitrage take method
+                    mac_take_orders, buy_volume, sell_volume = self.macaron_arb_take(
+                        mac_order_depth, obs, mac_position
                     )
 
-                # Call the arbitrage make method
-                mac_make_orders, _, _ = self.macaron_arb_make(
-                    mac_order_depth, obs, mac_position, buy_volume, sell_volume
-                )
-
-                # Log make orders
-                if mac_make_orders:
-                    logger.print(
-                        f"MACARONS: Generated {len(mac_make_orders)} make orders: {mac_make_orders}"
-                    )
-
-                # If we have orders to execute, clear the position and send orders
-                if mac_take_orders or mac_make_orders:
-                    # Convert existing position to bring it back to zero
-                    # In low sun regime, maintain maximum long position
-                    conversions = self.macaron_arb_clear(mac_position, obs)
-                    logger.print(f"MACARONS: Conversion quantity: {conversions}")
-
-                    # Combine all orders
-                    result["MAGNIFICENT_MACARONS"] = mac_take_orders + mac_make_orders
-                    logger.print(
-                        f"MACARONS: Added {len(result['MAGNIFICENT_MACARONS'])} orders to result"
-                    )
-
-                    # Track fill history for adaptive edge
-                    new_fills = sum(
-                        order.quantity
-                        for order in mac_take_orders
-                        if order.quantity > 0
-                    )
-                    new_fills += sum(
-                        -order.quantity
-                        for order in mac_take_orders
-                        if order.quantity < 0
-                    )
-                    if new_fills > 0:
-                        self.macaron_fill_history.append(new_fills)
-                        if len(self.macaron_fill_history) > 10:  # Keep last 10 fills
-                            self.macaron_fill_history.pop(0)
-
-                    # Adjust edge based on fill history
-                    if len(self.macaron_fill_history) >= 5:
-                        avg_fill = sum(self.macaron_fill_history) / len(
-                            self.macaron_fill_history
+                    # Log take orders
+                    if mac_take_orders:
+                        logger.print(
+                            f"MACARONS: Generated {len(mac_take_orders)} take orders: {mac_take_orders}"
                         )
-                        if self.low_sun_regime:
-                            # In low sun regime, be extremely aggressive with edge
-                            self.macaron_edge = max(0.1, self.macaron_edge * 0.8)
-                            logger.print(
-                                f"MACARONS: In low sun regime, reduced edge to {self.macaron_edge}"
+
+                    # Call the arbitrage make method
+                    mac_make_orders, _, _ = self.macaron_arb_make(
+                        mac_order_depth, obs, mac_position, buy_volume, sell_volume
+                    )
+
+                    # Log make orders
+                    if mac_make_orders:
+                        logger.print(
+                            f"MACARONS: Generated {len(mac_make_orders)} make orders: {mac_make_orders}"
+                        )
+
+                    # If we have orders to execute, clear the position and send orders
+                    if mac_take_orders or mac_make_orders:
+                        # Convert existing position to bring it back to zero
+                        # In low sun regime, maintain maximum long position
+                        conversions = self.macaron_arb_clear(mac_position, obs)
+                        logger.print(f"MACARONS: Conversion quantity: {conversions}")
+
+                        # Combine all orders
+                        result["MAGNIFICENT_MACARONS"] = mac_take_orders + mac_make_orders
+                        logger.print(
+                            f"MACARONS: Added {len(result['MAGNIFICENT_MACARONS'])} orders to result"
+                        )
+
+                        # Track fill history for adaptive edge
+                        new_fills = sum(
+                            order.quantity
+                            for order in mac_take_orders
+                            if order.quantity > 0
+                        )
+                        new_fills += sum(
+                            -order.quantity
+                            for order in mac_take_orders
+                            if order.quantity < 0
+                        )
+                        if new_fills > 0:
+                            self.macaron_fill_history.append(new_fills)
+                            if len(self.macaron_fill_history) > 10:  # Keep last 10 fills
+                                self.macaron_fill_history.pop(0)
+
+                        # Adjust edge based on fill history
+                        if len(self.macaron_fill_history) >= 5:
+                            avg_fill = sum(self.macaron_fill_history) / len(
+                                self.macaron_fill_history
                             )
-                        else:
-                            if avg_fill > self.macaron_target_vol * 1.5:
-                                # Too many fills, increase edge
-                                self.macaron_edge = min(2.0, self.macaron_edge * 1.1)
-                            elif avg_fill < self.macaron_target_vol * 0.5:
-                                # Too few fills, decrease edge
-                                self.macaron_edge = max(0.5, self.macaron_edge * 0.9)
-                            logger.print(
-                                f"MACARONS: Normal regime, adjusted edge to {self.macaron_edge}"
-                            )
+                            if self.low_sun_regime:
+                                # In low sun regime, be extremely aggressive with edge
+                                self.macaron_edge = max(0.1, self.macaron_edge * 0.8)
+                                logger.print(
+                                    f"MACARONS: In low sun regime, reduced edge to {self.macaron_edge}"
+                                )
+                            else:
+                                if avg_fill > self.macaron_target_vol * 1.5:
+                                    # Too many fills, increase edge
+                                    self.macaron_edge = min(2.0, self.macaron_edge * 1.1)
+                                elif avg_fill < self.macaron_target_vol * 0.5:
+                                    # Too few fills, decrease edge
+                                    self.macaron_edge = max(0.5, self.macaron_edge * 0.9)
+                                logger.print(
+                                    f"MACARONS: Normal regime, adjusted edge to {self.macaron_edge}"
+                                )
+                # If product is inactive but we have a position, try to close it
+                elif mac_position != 0:
+                    close_orders = self.close_position(
+                        "MAGNIFICENT_MACARONS", mac_order_depth, mac_position
+                    )
+                    if close_orders:
+                        result["MAGNIFICENT_MACARONS"] = close_orders
+                        logger.print(f"MACARONS: Inactive but closing position with {len(close_orders)} orders")
+                    
+                    # Don't do any conversions when inactive
 
             handled = set()
             if "MAGNIFICENT_MACARONS" in result:
