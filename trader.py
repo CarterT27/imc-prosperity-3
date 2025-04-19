@@ -1096,6 +1096,7 @@ class Trader:
         """
         Execute arbitrage take orders for Magnificent Macarons.
         Takes advantage of mispriced orders relative to implied values and arbitrage between local and foreign markets.
+        Balances position in high sun regime to avoid extreme positions.
 
         Args:
             order_depth: Current order depth for macarons (local market)
@@ -1128,15 +1129,39 @@ class Trader:
             best_ask = min(order_depth.sell_orders.keys())
             local_mid = (best_bid + best_ask) / 2
 
-        # Calculate available quantities
-        buy_quantity = position_limit - position
-        sell_quantity = position_limit + position
-
         # Edge calculation - will be more aggressive in low sunlight regime
         edge_factor = 1.5 if self.low_sun_regime else 1.0
         arb_threshold = (
             0.5  # Minimum price difference to consider an arbitrage opportunity
         )
+
+        # Position-based adjustments for order sizes
+        position_ratio = abs(position) / position_limit if position_limit > 0 else 0
+        
+        # Calculate available quantities with position awareness
+        base_buy_quantity = position_limit - position
+        base_sell_quantity = position_limit + position
+
+        # In high sun regime, scale order sizes based on current position
+        if not self.low_sun_regime and position_ratio > 0.3:
+            # Position is getting significant, adjust order sizes
+            if position > 0:
+                # Long position - reduce buy orders, keep sell orders normal
+                buy_scale = max(0.2, 1.0 - (position_ratio * 1.5))  # Scale down buys more aggressively
+                sell_scale = 1.0
+                logger.print(f"MACARONS TAKE: Position bias - reducing buy orders (scale: {buy_scale:.2f}) due to long position")
+            else:
+                # Short position - reduce sell orders, keep buy orders normal
+                buy_scale = 1.0
+                sell_scale = max(0.2, 1.0 - (position_ratio * 1.5))  # Scale down sells more aggressively
+                logger.print(f"MACARONS TAKE: Position bias - reducing sell orders (scale: {sell_scale:.2f}) due to short position")
+            
+            buy_quantity = int(base_buy_quantity * buy_scale)
+            sell_quantity = int(base_sell_quantity * sell_scale)
+        else:
+            # Normal order sizes
+            buy_quantity = base_buy_quantity
+            sell_quantity = base_sell_quantity
 
         # If in low sun regime, buy aggressively at any price
         if self.low_sun_regime and buy_quantity > 0 and order_depth.sell_orders:
@@ -1153,12 +1178,25 @@ class Trader:
                 if buy_quantity <= 0:
                     break
         else:
-            # High sunlight regime - look for arbitrage opportunities
+            # High sunlight regime - look for arbitrage opportunities with position awareness
 
+            # Calculate profitability thresholds - adjust based on position
+            buy_threshold = arb_threshold
+            sell_threshold = arb_threshold
+            
+            # Make thresholds stricter for orders that increase existing position bias
+            if position_ratio > 0.5:
+                if position > 0:
+                    # Long position - make buy threshold stricter
+                    buy_threshold = arb_threshold * (1 + position_ratio)
+                else:
+                    # Short position - make sell threshold stricter
+                    sell_threshold = arb_threshold * (1 + position_ratio)
+            
             # 1. If local ask price is significantly below the implied bid, buy locally
-            if order_depth.sell_orders:
+            if order_depth.sell_orders and buy_quantity > 0:
                 best_ask = min(order_depth.sell_orders.keys())
-                if best_ask < implied_bid - arb_threshold:
+                if best_ask < implied_bid - buy_threshold:
                     # Profitable to buy locally and export to foreign market
                     quantity = min(abs(order_depth.sell_orders[best_ask]), buy_quantity)
                     if quantity > 0:
@@ -1166,13 +1204,13 @@ class Trader:
                         buy_order_volume += quantity
                         buy_quantity -= quantity
                         logger.print(
-                            f"MACARONS: Arbitrage BUY at {best_ask}, implied_bid: {implied_bid}"
+                            f"MACARONS: Arbitrage BUY at {best_ask}, implied_bid: {implied_bid}, threshold: {buy_threshold:.2f}"
                         )
 
             # 2. If local bid price is significantly above the implied ask, sell locally
-            if order_depth.buy_orders:
+            if order_depth.buy_orders and sell_quantity > 0:
                 best_bid = max(order_depth.buy_orders.keys())
-                if best_bid > implied_ask + arb_threshold:
+                if best_bid > implied_ask + sell_threshold:
                     # Profitable to sell locally and import from foreign market
                     quantity = min(abs(order_depth.buy_orders[best_bid]), sell_quantity)
                     if quantity > 0:
@@ -1182,7 +1220,7 @@ class Trader:
                         sell_order_volume += quantity
                         sell_quantity -= quantity
                         logger.print(
-                            f"MACARONS: Arbitrage SELL at {best_bid}, implied_ask: {implied_ask}"
+                            f"MACARONS: Arbitrage SELL at {best_bid}, implied_ask: {implied_ask}, threshold: {sell_threshold:.2f}"
                         )
 
             # 3. Compare market mid prices for broader arbitrage opportunities
@@ -1191,11 +1229,11 @@ class Trader:
                 and abs(local_mid - foreign_mid) > 2 * arb_threshold
             ):
                 # Local market is significantly mispriced relative to foreign market
-                if local_mid < foreign_mid:
+                if local_mid < foreign_mid and buy_quantity > 0:
                     # Local market is underpriced - buy locally
-                    if order_depth.sell_orders and buy_quantity > 0:
+                    if order_depth.sell_orders:
                         for price in sorted(list(order_depth.sell_orders.keys())):
-                            if price < foreign_mid - arb_threshold:
+                            if price < foreign_mid - buy_threshold:
                                 quantity = min(
                                     abs(order_depth.sell_orders[price]), buy_quantity
                                 )
@@ -1210,13 +1248,13 @@ class Trader:
                                     )
                             else:
                                 break
-                else:
+                elif local_mid > foreign_mid and sell_quantity > 0:
                     # Local market is overpriced - sell locally
-                    if order_depth.buy_orders and sell_quantity > 0:
+                    if order_depth.buy_orders:
                         for price in sorted(
                             list(order_depth.buy_orders.keys()), reverse=True
                         ):
-                            if price > foreign_mid + arb_threshold:
+                            if price > foreign_mid + sell_threshold:
                                 quantity = min(
                                     abs(order_depth.buy_orders[price]), sell_quantity
                                 )
@@ -1233,10 +1271,23 @@ class Trader:
                                 break
 
             # 4. Standard take orders based on implied prices (aggressive taking)
+            # Use dynamic edge based on position
+            buy_edge = self.macaron_edge * edge_factor
+            sell_edge = self.macaron_edge * edge_factor
+            
+            # Apply stricter edges when position is biased
+            if position_ratio > 0.4:
+                if position > 0:
+                    # Long position - stricter buy edge, looser sell edge
+                    buy_edge *= (1 + position_ratio)
+                else:
+                    # Short position - looser buy edge, stricter sell edge
+                    sell_edge *= (1 + position_ratio)
+            
             if buy_quantity > 0 and order_depth.sell_orders:
                 for price in sorted(list(order_depth.sell_orders.keys())):
                     # Stop if price is too high relative to implied bid
-                    if price > implied_bid - self.macaron_edge * edge_factor:
+                    if price > implied_bid - buy_edge:
                         break
 
                     # Take the order if it's below our threshold
@@ -1249,7 +1300,7 @@ class Trader:
             if sell_quantity > 0 and order_depth.buy_orders:
                 for price in sorted(list(order_depth.buy_orders.keys()), reverse=True):
                     # Stop if price is too low relative to implied ask
-                    if price < implied_ask + self.macaron_edge * edge_factor:
+                    if price < implied_ask + sell_edge:
                         break
 
                     # Take the order if it's above our threshold
@@ -1300,34 +1351,40 @@ class Trader:
             # Fixed import/export costs (transaction costs, slippage, etc.)
             trade_threshold = 1.0
 
-            if position > 0:
-                # If we have positive position (long macarons)
-                # Only export if foreign bid is significantly high (profitable to export)
-                if implied_bid > implied_ask + trade_threshold:
-                    logger.print(
-                        f"MACARONS: Profitable export to foreign island. implied_bid: {implied_bid}, implied_ask: {implied_ask}"
-                    )
-                    return min(MAX_CONVERSION_LIMIT, position)  # Export all (positive = export), limited to max
-                # If the spread is small, export a portion proportional to size of position
-                elif bid_ask_spread < trade_threshold and position > 10:
-                    return min(MAX_CONVERSION_LIMIT, max(1, position // 2))  # Export half of position, limited to max
-            elif position < 0:
-                # If we have negative position (short macarons)
-                # Only import if foreign ask is significantly low (profitable to import)
-                if implied_ask < implied_bid - trade_threshold:
-                    logger.print(
-                        f"MACARONS: Profitable import from foreign island. implied_ask: {implied_ask}, implied_bid: {implied_bid}"
-                    )
-                    return max(-MAX_CONVERSION_LIMIT, position)  # Import all (negative = import), limited to max
-                # If the spread is small, import a portion proportional to size of position
-                elif bid_ask_spread < trade_threshold and position < -10:
-                    return max(-MAX_CONVERSION_LIMIT, min(-1, position // 2))  # Import half of position, limited to max
+            # Calculate target position based on implied prices
+            target_position = 0
+            
+            # If the spread indicates good trading conditions, consider a more balanced position
+            if bid_ask_spread < trade_threshold:
+                # Aim for a balanced position that's slightly long or short based on market conditions
+                if implied_bid > implied_ask:
+                    # Market is favorable for exporting - bias slightly long
+                    target_position = 10
+                else:
+                    # Market is favorable for importing - bias slightly short
+                    target_position = -10
+            else:
+                # Larger spread - stay closer to neutral
+                target_position = 0
+            
+            # Calculate position adjustment needed
+            position_adjustment = target_position - position
+            
+            # Limit adjustment to MAX_CONVERSION_LIMIT
+            if position_adjustment > 0:
+                # Need to import (negative conversion value)
+                return max(-MAX_CONVERSION_LIMIT, -position_adjustment)
+            else:
+                # Need to export (positive conversion value)
+                return min(MAX_CONVERSION_LIMIT, -position_adjustment)
 
-        # Default: clear the entire position, but limited to conversion limit
-        if position > 0:
-            return min(MAX_CONVERSION_LIMIT, -position)
-        else:
-            return max(-MAX_CONVERSION_LIMIT, -position)
+        # Default: clear half the position if it's significant, otherwise leave it
+        if abs(position) > 20:
+            if position > 0:
+                return min(MAX_CONVERSION_LIMIT, -position // 2)
+            else:
+                return max(-MAX_CONVERSION_LIMIT, -position // 2)
+        return 0
 
     def macaron_arb_make(
         self,
@@ -1400,8 +1457,8 @@ class Trader:
             # No sell orders in low sun regime - maintain maximum long position
 
         else:
-            # High sunlight regime - market making with arbitrage awareness
-
+            # High sunlight regime - balanced market making with arbitrage awareness
+            
             # Calculate base edge
             edge = self.macaron_edge * 1.0
             arb_threshold = 0.5  # Same as in take function
@@ -1466,14 +1523,41 @@ class Trader:
                 else:
                     bid = implied_bid - edge + price_adjustment
 
-            # Normal market making in high sun regime
-            buy_quantity = position_limit - (position + buy_order_volume)
+            # Calculate position skew factor (0.0 to 1.0) to balance our orders
+            # When position is close to position_limit, we reduce orders in that direction
+            skew_factor = 0.5
+            
+            # Adjust order sizes based on current position to maintain balance
+            position_ratio = abs(position) / position_limit if position_limit > 0 else 0
+            if position_ratio > 0.5:
+                # If position is already significant, reduce order size in that direction
+                skew_factor = max(0.2, 1.0 - position_ratio)  # At least 20% of normal size
+                
+                if position > 0:
+                    # Long position - reduce buy orders, increase sell orders
+                    buy_skew = skew_factor
+                    sell_skew = 1.0
+                else:
+                    # Short position - reduce sell orders, increase buy orders
+                    buy_skew = 1.0
+                    sell_skew = skew_factor
+            else:
+                # Position is relatively balanced, use normal sizing
+                buy_skew = 1.0
+                sell_skew = 1.0
+            
+            # Balanced market making in high sun regime
+            buy_quantity = int((position_limit - (position + buy_order_volume)) * buy_skew)
             if buy_quantity > 0:
                 orders.append(Order("MAGNIFICENT_MACARONS", round(bid), buy_quantity))
-
-            sell_quantity = position_limit + (position - sell_order_volume)
+                
+            sell_quantity = int((position_limit + (position - sell_order_volume)) * sell_skew)
             if sell_quantity > 0:
                 orders.append(Order("MAGNIFICENT_MACARONS", round(ask), -sell_quantity))
+                
+            # Log the order skew for debugging
+            if buy_skew != 1.0 or sell_skew != 1.0:
+                logger.print(f"MACARONS: Position balancing - buy_skew: {buy_skew:.2f}, sell_skew: {sell_skew:.2f}, position_ratio: {position_ratio:.2f}")
 
         return orders, buy_order_volume, sell_order_volume
 
