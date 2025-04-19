@@ -910,31 +910,6 @@ class Trader:
             logger.print(f"Error in volcanic_rock_voucher_orders: {e}")
             return [], []
 
-    def volcanic_rock_hedge_orders(
-        self,
-        rock_order_depth: OrderDepth,
-        rock_position: int,
-        voucher_positions: dict[str, int],
-        deltas: dict[str, float],
-    ) -> list[Order]:
-        total_delta = 0.0
-        for voucher_symbol, pos in voucher_positions.items():
-            if voucher_symbol in deltas:
-                total_delta += deltas[voucher_symbol] * pos
-        target_rock_position = -int(total_delta)
-        current_rock_position = rock_position
-        if target_rock_position == current_rock_position:
-            return []
-        orders = []
-        quantity = target_rock_position - current_rock_position
-        if quantity > 0:
-            best_ask = min(rock_order_depth.sell_orders.keys())
-            orders.append(Order("VOLCANIC_ROCK", best_ask, quantity))
-        else:
-            best_bid = max(rock_order_depth.buy_orders.keys())
-            orders.append(Order("VOLCANIC_ROCK", best_bid, quantity))
-        return orders
-
     def calculate_synthetic_position(
         self,
         rock_price: float,
@@ -1790,19 +1765,6 @@ class Trader:
                         if arbitrage_orders:
                             for order in arbitrage_orders:
                                 result.setdefault(order.symbol, []).append(order)
-
-                    if voucher_deltas:
-                        try:
-                            hedge_orders = self.volcanic_rock_hedge_orders(
-                                rock_order_depth,
-                                rock_position,
-                                voucher_positions,
-                                voucher_deltas,
-                            )
-                            if hedge_orders:
-                                result["VOLCANIC_ROCK"] = hedge_orders
-                        except Exception as e:
-                            logger.print(f"Error generating hedge orders: {e}")
 
                     vol_orders = self.volcanic_rock_orders(
                         rock_order_depth, rock_position, state
