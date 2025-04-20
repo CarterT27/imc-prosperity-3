@@ -19,7 +19,17 @@ import typing
 
 import json
 from typing import Any, List, Dict
-from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
+from datamodel import (
+    Listing,
+    Observation,
+    Order,
+    OrderDepth,
+    ProsperityEncoder,
+    Symbol,
+    Trade,
+    TradingState,
+)
+
 
 class Logger:
     def __init__(self) -> None:
@@ -80,20 +90,29 @@ class Logger:
         self, order_depths: Dict[Symbol, OrderDepth]
     ) -> Dict[Symbol, List[Any]]:
         return {
-            sym: [od.buy_orders, od.sell_orders]
-            for sym, od in order_depths.items()
+            sym: [od.buy_orders, od.sell_orders] for sym, od in order_depths.items()
         }
 
     def compress_trades(self, trades: Dict[Symbol, List[Trade]]) -> List[List[Any]]:
         compressed = []
         for arr in trades.values():
             for t in arr:
-                compressed.append([t.symbol, t.price, t.quantity, t.buyer, t.seller, t.timestamp])
+                compressed.append(
+                    [t.symbol, t.price, t.quantity, t.buyer, t.seller, t.timestamp]
+                )
         return compressed
 
     def compress_observations(self, obs: Observation) -> List[Any]:
         conv = {
-            p: [v.bidPrice, v.askPrice, v.transportFees, v.exportTariff, v.importTariff, v.sugarPrice, v.sunlightIndex]
+            p: [
+                v.bidPrice,
+                v.askPrice,
+                v.transportFees,
+                v.exportTariff,
+                v.importTariff,
+                v.sugarPrice,
+                v.sunlightIndex,
+            ]
             for p, v in obs.conversionObservations.items()
         }
         return [obs.plainValueObservations, conv]
@@ -122,6 +141,7 @@ class Logger:
             else:
                 hi = mid - 1
         return best
+
 
 # instantiate logger
 logger = Logger()
@@ -1110,7 +1130,7 @@ class Trader:
 
         # Position-based adjustments for order sizes
         position_ratio = abs(position) / position_limit if position_limit > 0 else 0
-        
+
         # Calculate available quantities with position awareness
         base_buy_quantity = position_limit - position
         base_sell_quantity = position_limit + position
@@ -1120,15 +1140,23 @@ class Trader:
             # Position is getting significant, adjust order sizes
             if position > 0:
                 # Long position - reduce buy orders, keep sell orders normal
-                buy_scale = max(0.2, 1.0 - (position_ratio * 1.5))  # Scale down buys more aggressively
+                buy_scale = max(
+                    0.2, 1.0 - (position_ratio * 1.5)
+                )  # Scale down buys more aggressively
                 sell_scale = 1.0
-                logger.print(f"MACARONS TAKE: Position bias - reducing buy orders (scale: {buy_scale:.2f}) due to long position")
+                logger.print(
+                    f"MACARONS TAKE: Position bias - reducing buy orders (scale: {buy_scale:.2f}) due to long position"
+                )
             else:
                 # Short position - reduce sell orders, keep buy orders normal
                 buy_scale = 1.0
-                sell_scale = max(0.2, 1.0 - (position_ratio * 1.5))  # Scale down sells more aggressively
-                logger.print(f"MACARONS TAKE: Position bias - reducing sell orders (scale: {sell_scale:.2f}) due to short position")
-            
+                sell_scale = max(
+                    0.2, 1.0 - (position_ratio * 1.5)
+                )  # Scale down sells more aggressively
+                logger.print(
+                    f"MACARONS TAKE: Position bias - reducing sell orders (scale: {sell_scale:.2f}) due to short position"
+                )
+
             buy_quantity = int(base_buy_quantity * buy_scale)
             sell_quantity = int(base_sell_quantity * sell_scale)
         else:
@@ -1156,7 +1184,7 @@ class Trader:
             # Calculate profitability thresholds - adjust based on position
             buy_threshold = arb_threshold
             sell_threshold = arb_threshold
-            
+
             # Make thresholds stricter for orders that increase existing position bias
             if position_ratio > 0.5:
                 if position > 0:
@@ -1165,7 +1193,7 @@ class Trader:
                 else:
                     # Short position - make sell threshold stricter
                     sell_threshold = arb_threshold * (1 + position_ratio)
-            
+
             # 1. If local ask price is significantly below the implied bid, buy locally
             if order_depth.sell_orders and buy_quantity > 0:
                 best_ask = min(order_depth.sell_orders.keys())
@@ -1247,16 +1275,16 @@ class Trader:
             # Use dynamic edge based on position
             buy_edge = self.macaron_edge * edge_factor
             sell_edge = self.macaron_edge * edge_factor
-            
+
             # Apply stricter edges when position is biased
             if position_ratio > 0.4:
                 if position > 0:
                     # Long position - stricter buy edge, looser sell edge
-                    buy_edge *= (1 + position_ratio)
+                    buy_edge *= 1 + position_ratio
                 else:
                     # Short position - looser buy edge, stricter sell edge
-                    sell_edge *= (1 + position_ratio)
-            
+                    sell_edge *= 1 + position_ratio
+
             if buy_quantity > 0 and order_depth.sell_orders:
                 for price in sorted(list(order_depth.sell_orders.keys())):
                     # Stop if price is too high relative to implied bid
@@ -1299,7 +1327,7 @@ class Trader:
         """
         # Maximum allowed conversion limit
         MAX_CONVERSION_LIMIT = 10
-        
+
         # In low sun regime, focus on importing macarons to maintain maximum long position
         if self.low_sun_regime:
             # Only import macarons to clear negative position
@@ -1326,7 +1354,7 @@ class Trader:
 
             # Calculate target position based on implied prices
             target_position = 0
-            
+
             # If the spread indicates good trading conditions, consider a more balanced position
             if bid_ask_spread < trade_threshold:
                 # Aim for a balanced position that's slightly long or short based on market conditions
@@ -1339,10 +1367,10 @@ class Trader:
             else:
                 # Larger spread - stay closer to neutral
                 target_position = 0
-            
+
             # Calculate position adjustment needed
             position_adjustment = target_position - position
-            
+
             # Limit adjustment to MAX_CONVERSION_LIMIT
             if position_adjustment > 0:
                 # Need to import (negative conversion value)
@@ -1431,7 +1459,7 @@ class Trader:
 
         else:
             # High sunlight regime - balanced market making with arbitrage awareness
-            
+
             # Calculate base edge
             edge = self.macaron_edge * 1.0
             arb_threshold = 0.5  # Same as in take function
@@ -1499,13 +1527,15 @@ class Trader:
             # Calculate position skew factor (0.0 to 1.0) to balance our orders
             # When position is close to position_limit, we reduce orders in that direction
             skew_factor = 0.5
-            
+
             # Adjust order sizes based on current position to maintain balance
             position_ratio = abs(position) / position_limit if position_limit > 0 else 0
             if position_ratio > 0.5:
                 # If position is already significant, reduce order size in that direction
-                skew_factor = max(0.2, 1.0 - position_ratio)  # At least 20% of normal size
-                
+                skew_factor = max(
+                    0.2, 1.0 - position_ratio
+                )  # At least 20% of normal size
+
                 if position > 0:
                     # Long position - reduce buy orders, increase sell orders
                     buy_skew = skew_factor
@@ -1518,19 +1548,25 @@ class Trader:
                 # Position is relatively balanced, use normal sizing
                 buy_skew = 1.0
                 sell_skew = 1.0
-            
+
             # Balanced market making in high sun regime
-            buy_quantity = int((position_limit - (position + buy_order_volume)) * buy_skew)
+            buy_quantity = int(
+                (position_limit - (position + buy_order_volume)) * buy_skew
+            )
             if buy_quantity > 0:
                 orders.append(Order("MAGNIFICENT_MACARONS", round(bid), buy_quantity))
-                
-            sell_quantity = int((position_limit + (position - sell_order_volume)) * sell_skew)
+
+            sell_quantity = int(
+                (position_limit + (position - sell_order_volume)) * sell_skew
+            )
             if sell_quantity > 0:
                 orders.append(Order("MAGNIFICENT_MACARONS", round(ask), -sell_quantity))
-                
+
             # Log the order skew for debugging
             if buy_skew != 1.0 or sell_skew != 1.0:
-                logger.print(f"MACARONS: Position balancing - buy_skew: {buy_skew:.2f}, sell_skew: {sell_skew:.2f}, position_ratio: {position_ratio:.2f}")
+                logger.print(
+                    f"MACARONS: Position balancing - buy_skew: {buy_skew:.2f}, sell_skew: {sell_skew:.2f}, position_ratio: {position_ratio:.2f}"
+                )
 
         return orders, buy_order_volume, sell_order_volume
 
@@ -1645,7 +1681,9 @@ class Trader:
                         logger.print(f"MACARONS: Conversion quantity: {conversions}")
 
                         # Combine all orders
-                        result["MAGNIFICENT_MACARONS"] = mac_take_orders + mac_make_orders
+                        result["MAGNIFICENT_MACARONS"] = (
+                            mac_take_orders + mac_make_orders
+                        )
                         logger.print(
                             f"MACARONS: Added {len(result['MAGNIFICENT_MACARONS'])} orders to result"
                         )
@@ -1663,7 +1701,9 @@ class Trader:
                         )
                         if new_fills > 0:
                             self.macaron_fill_history.append(new_fills)
-                            if len(self.macaron_fill_history) > 10:  # Keep last 10 fills
+                            if (
+                                len(self.macaron_fill_history) > 10
+                            ):  # Keep last 10 fills
                                 self.macaron_fill_history.pop(0)
 
                         # Adjust edge based on fill history
@@ -1680,10 +1720,14 @@ class Trader:
                             else:
                                 if avg_fill > self.macaron_target_vol * 1.5:
                                     # Too many fills, increase edge
-                                    self.macaron_edge = min(2.0, self.macaron_edge * 1.1)
+                                    self.macaron_edge = min(
+                                        2.0, self.macaron_edge * 1.1
+                                    )
                                 elif avg_fill < self.macaron_target_vol * 0.5:
                                     # Too few fills, decrease edge
-                                    self.macaron_edge = max(0.5, self.macaron_edge * 0.9)
+                                    self.macaron_edge = max(
+                                        0.5, self.macaron_edge * 0.9
+                                    )
                                 logger.print(
                                     f"MACARONS: Normal regime, adjusted edge to {self.macaron_edge}"
                                 )
@@ -1694,8 +1738,10 @@ class Trader:
                     )
                     if close_orders:
                         result["MAGNIFICENT_MACARONS"] = close_orders
-                        logger.print(f"MACARONS: Inactive but closing position with {len(close_orders)} orders")
-                    
+                        logger.print(
+                            f"MACARONS: Inactive but closing position with {len(close_orders)} orders"
+                        )
+
                     # Don't do any conversions when inactive
 
             handled = set()
@@ -1717,7 +1763,7 @@ class Trader:
                             try:
                                 voucher_position = state.position.get(voucher_symbol, 0)
                                 voucher_positions[voucher_symbol] = voucher_position
-                                
+
                                 # Only generate orders if the voucher is active
                                 if self.active_products.get(voucher_symbol, False):
                                     take_orders, make_orders = (
@@ -1738,12 +1784,14 @@ class Trader:
                                 # If inactive but has position, try to close it
                                 elif voucher_position != 0:
                                     close_orders = self.close_position(
-                                        voucher_symbol, 
-                                        state.order_depths[voucher_symbol], 
-                                        voucher_position
+                                        voucher_symbol,
+                                        state.order_depths[voucher_symbol],
+                                        voucher_position,
                                     )
                                     if close_orders:
-                                        result.setdefault(voucher_symbol, []).extend(close_orders)
+                                        result.setdefault(voucher_symbol, []).extend(
+                                            close_orders
+                                        )
                             except Exception as e:
                                 logger.print(
                                     f"Error processing voucher {voucher_symbol}: {e}"
@@ -1779,13 +1827,13 @@ class Trader:
             for product in state.order_depths.keys():
                 if product in handled:
                     continue
-                
+
                 position = state.position.get(product, 0)
-                
+
                 if product in ["PICNIC_BASKET1", "PICNIC_BASKET2"]:
                     # Always calculate synthetic values for baskets
                     synthetic_value = self.calculate_synthetic_value(state, product)
-                    
+
                     # Only execute trades if the product is active
                     if self.active_products.get(product, False):
                         arbitrage_orders = self.execute_basket_arbitrage(state, product)
@@ -1803,18 +1851,29 @@ class Trader:
                                 # Only add orders for active products
                                 if self.active_products.get(p, False):
                                     result.setdefault(p, []).extend(orders)
-                
-                elif product in ["KELP", "RAINFOREST_RESIN", "SQUID_INK", "CROISSANTS", "JAMS", "DJEMBES"]:
+
+                elif product in [
+                    "KELP",
+                    "RAINFOREST_RESIN",
+                    "SQUID_INK",
+                    "CROISSANTS",
+                    "JAMS",
+                    "DJEMBES",
+                ]:
                     # Always perform calculations
                     if product == "KELP":
-                        self.kelp_prices.append(self.calculate_fair_value(state.order_depths[product]) or 0)
+                        self.kelp_prices.append(
+                            self.calculate_fair_value(state.order_depths[product]) or 0
+                        )
                         if len(self.kelp_prices) > self.timespan:
                             self.kelp_prices.pop(0)
                     elif product == "RAINFOREST_RESIN":
-                        self.resin_prices.append(self.calculate_fair_value(state.order_depths[product]) or 0)
+                        self.resin_prices.append(
+                            self.calculate_fair_value(state.order_depths[product]) or 0
+                        )
                         if len(self.resin_prices) > self.timespan:
                             self.resin_prices.pop(0)
-                    
+
                     # Only execute trades if the product is active
                     if self.active_products.get(product, False):
                         orders = self.product_orders(
@@ -1822,7 +1881,7 @@ class Trader:
                         )
                         if orders:
                             result[product] = orders
-                
+
                 # Handle vouchers - check separately since they have different names
                 elif product.startswith("VOLCANIC_ROCK_VOUCHER_"):
                     # Only execute trades if the product is active
@@ -1833,14 +1892,14 @@ class Trader:
                             )
                             if orders:
                                 result[product] = orders
-                
+
                 elif product in self.active_products and self.active_products[product]:
                     orders = self.product_orders(
                         product, state.order_depths[product], position
                     )
                     if orders:
                         result[product] = orders
-                
+
                 # For inactive products with positions, close the positions
                 elif position != 0:
                     orders = self.close_position(
