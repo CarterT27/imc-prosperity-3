@@ -1,4 +1,4 @@
-./imc-prosperity-3-backtester
+prosperity3bt
 pandas
 numpy
 statistics
