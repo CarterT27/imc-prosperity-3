@@ -1132,18 +1132,12 @@ class Trader:
                     0.2, 1.0 - (position_ratio * 1.5)
                 )  # Scale down buys more aggressively
                 sell_scale = 1.0
-                logger.print(
-                    f"MACARONS TAKE: Position bias - reducing buy orders (scale: {buy_scale:.2f}) due to long position"
-                )
             else:
                 # Short position - reduce sell orders, keep buy orders normal
                 buy_scale = 1.0
                 sell_scale = max(
                     0.2, 1.0 - (position_ratio * 1.5)
                 )  # Scale down sells more aggressively
-                logger.print(
-                    f"MACARONS TAKE: Position bias - reducing sell orders (scale: {sell_scale:.2f}) due to short position"
-                )
 
             buy_quantity = int(base_buy_quantity * buy_scale)
             sell_quantity = int(base_sell_quantity * sell_scale)
@@ -1192,9 +1186,6 @@ class Trader:
                         orders.append(Order("MAGNIFICENT_MACARONS", best_ask, quantity))
                         buy_order_volume += quantity
                         buy_quantity -= quantity
-                        logger.print(
-                            f"MACARONS: Arbitrage BUY at {best_ask}, implied_bid: {implied_bid}, threshold: {buy_threshold:.2f}"
-                        )
 
             # 2. If local bid price is significantly above the implied ask, sell locally
             if order_depth.buy_orders and sell_quantity > 0:
@@ -1208,9 +1199,6 @@ class Trader:
                         )
                         sell_order_volume += quantity
                         sell_quantity -= quantity
-                        logger.print(
-                            f"MACARONS: Arbitrage SELL at {best_bid}, implied_ask: {implied_ask}, threshold: {sell_threshold:.2f}"
-                        )
 
             # 3. Compare market mid prices for broader arbitrage opportunities
             if (
@@ -1232,9 +1220,6 @@ class Trader:
                                     )
                                     buy_order_volume += quantity
                                     buy_quantity -= quantity
-                                    logger.print(
-                                        f"MACARONS: Mid-price Arbitrage BUY at {price}, foreign_mid: {foreign_mid}"
-                                    )
                             else:
                                 break
                 elif local_mid > foreign_mid and sell_quantity > 0:
@@ -1253,9 +1238,6 @@ class Trader:
                                     )
                                     sell_order_volume += quantity
                                     sell_quantity -= quantity
-                                    logger.print(
-                                        f"MACARONS: Mid-price Arbitrage SELL at {price}, foreign_mid: {foreign_mid}"
-                                    )
                             else:
                                 break
 
@@ -1462,9 +1444,6 @@ class Trader:
                     price_adjustment = (
                         mid_diff * 0.5
                     )  # Partial adjustment toward foreign mid
-                    logger.print(
-                        f"MACARONS: Market making price adjustment: {price_adjustment:.2f} based on mid diff: {mid_diff:.2f}"
-                    )
 
             # Calculate bid and ask prices with adjustments
             bid = implied_bid - edge + price_adjustment
@@ -1477,9 +1456,6 @@ class Trader:
             if conv.bidPrice > implied_bid + arb_threshold:
                 # We can be more aggressive with our ask price
                 aggressive_ask = conv.bidPrice - 1.0
-                logger.print(
-                    f"MACARONS: Using aggressive ask {aggressive_ask} based on foreign bidPrice {conv.bidPrice}"
-                )
 
             # Use aggressive ask if it's profitable
             min_edge = 0.5  # Minimum acceptable edge
@@ -1550,12 +1526,6 @@ class Trader:
             if sell_quantity > 0:
                 orders.append(Order("MAGNIFICENT_MACARONS", round(ask), -sell_quantity))
 
-            # Log the order skew for debugging
-            if buy_skew != 1.0 or sell_skew != 1.0:
-                logger.print(
-                    f"MACARONS: Position balancing - buy_skew: {buy_skew:.2f}, sell_skew: {sell_skew:.2f}, position_ratio: {position_ratio:.2f}"
-                )
-
         return orders, buy_order_volume, sell_order_volume
 
     def run(self, state: TradingState) -> tuple[dict[str, list[Order]], int, str]:
@@ -1577,18 +1547,6 @@ class Trader:
                     self.low_sun_regime = True
                 else:
                     self.low_sun_regime = False
-
-                # Log the sunlight regime
-                if previous_regime != self.low_sun_regime:
-                    logger.print(
-                        f"SUNLIGHT REGIME CHANGE: {'LOW' if self.low_sun_regime else 'HIGH'} sun regime. Current CSI: {current_sun:.2f}, Threshold: {self.CSI_threshold}"
-                    )
-                else:
-                    logger.print(
-                        f"SUNLIGHT STATUS: {'LOW' if self.low_sun_regime else 'HIGH'} sun regime. Current CSI: {current_sun:.2f}, Threshold: {self.CSI_threshold}"
-                    )
-            else:
-                self.low_sun_regime = False
 
             current_day = state.timestamp // 1000000
             if current_day != self.current_day:
@@ -1625,18 +1583,6 @@ class Trader:
                 mac_position = state.position.get("MAGNIFICENT_MACARONS", 0)
                 mac_order_depth = state.order_depths["MAGNIFICENT_MACARONS"]
 
-                # Log current state for debugging
-                logger.print(
-                    f"MACARONS: Current position: {mac_position}, Low sun regime: {self.low_sun_regime}, Active: {self.active_products.get('MAGNIFICENT_MACARONS', False)}"
-                )
-                if "MAGNIFICENT_MACARONS" in obs.conversionObservations:
-                    csi = obs.conversionObservations[
-                        "MAGNIFICENT_MACARONS"
-                    ].sunlightIndex
-                    logger.print(
-                        f"MACARONS: CSI: {csi}, Threshold: {self.CSI_threshold}"
-                    )
-
                 # Only trade if the product is active
                 if self.active_products.get("MAGNIFICENT_MACARONS", False):
                     # Call the arbitrage take method
@@ -1644,36 +1590,20 @@ class Trader:
                         mac_order_depth, obs, mac_position
                     )
 
-                    # Log take orders
-                    if mac_take_orders:
-                        logger.print(
-                            f"MACARONS: Generated {len(mac_take_orders)} take orders: {mac_take_orders}"
-                        )
-
                     # Call the arbitrage make method
                     mac_make_orders, _, _ = self.macaron_arb_make(
                         mac_order_depth, obs, mac_position, buy_volume, sell_volume
                     )
-
-                    # Log make orders
-                    if mac_make_orders:
-                        logger.print(
-                            f"MACARONS: Generated {len(mac_make_orders)} make orders: {mac_make_orders}"
-                        )
 
                     # If we have orders to execute, clear the position and send orders
                     if mac_take_orders or mac_make_orders:
                         # Convert existing position to bring it back to zero
                         # In low sun regime, maintain maximum long position
                         conversions = self.macaron_arb_clear(mac_position, obs)
-                        logger.print(f"MACARONS: Conversion quantity: {conversions}")
 
                         # Combine all orders
                         result["MAGNIFICENT_MACARONS"] = (
                             mac_take_orders + mac_make_orders
-                        )
-                        logger.print(
-                            f"MACARONS: Added {len(result['MAGNIFICENT_MACARONS'])} orders to result"
                         )
 
                         # Track fill history for adaptive edge
@@ -1702,9 +1632,6 @@ class Trader:
                             if self.low_sun_regime:
                                 # In low sun regime, be extremely aggressive with edge
                                 self.macaron_edge = max(0.1, self.macaron_edge * 0.8)
-                                logger.print(
-                                    f"MACARONS: In low sun regime, reduced edge to {self.macaron_edge}"
-                                )
                             else:
                                 if avg_fill > self.macaron_target_vol * 1.5:
                                     # Too many fills, increase edge
@@ -1716,9 +1643,6 @@ class Trader:
                                     self.macaron_edge = max(
                                         0.5, self.macaron_edge * 0.9
                                     )
-                                logger.print(
-                                    f"MACARONS: Normal regime, adjusted edge to {self.macaron_edge}"
-                                )
                 # If product is inactive but we have a position, try to close it
                 elif mac_position != 0:
                     close_orders = self.close_position(
@@ -1726,9 +1650,6 @@ class Trader:
                     )
                     if close_orders:
                         result["MAGNIFICENT_MACARONS"] = close_orders
-                        logger.print(
-                            f"MACARONS: Inactive but closing position with {len(close_orders)} orders"
-                        )
 
                     # Don't do any conversions when inactive
 
