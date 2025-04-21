@@ -2,7 +2,6 @@ import json
 import math
 import statistics
 import typing
-from typing import Any, Dict, List
 
 import jsonpickle
 import numpy as np
@@ -26,13 +25,13 @@ class Logger:
         self.max_log_length = 2000
         self.logs: str = ""
 
-    def print(self, *objects: Any, sep: str = " ", end: str = "\n") -> None:
+    def print(self, *objects, sep: str = " ", end: str = "\n") -> None:
         self.logs += sep.join(map(str, objects)) + end
 
     def flush(
         self,
         state: TradingState,
-        orders: Dict[Symbol, List[Order]],
+        orders: dict[Symbol, list[Order]],
         conversions: int,
         trader_data: str,
     ) -> None:
@@ -72,17 +71,17 @@ class Logger:
             self.compress_observations(state.observations),
         ]
 
-    def compress_listings(self, listings: Dict[Symbol, Listing]) -> List[List[Any]]:
+    def compress_listings(self, listings: dict[Symbol, Listing]) -> list[list]:
         return [[l.symbol, l.product, l.denomination] for l in listings.values()]
 
     def compress_order_depths(
-        self, order_depths: Dict[Symbol, OrderDepth]
-    ) -> Dict[Symbol, List[Any]]:
+        self, order_depths: dict[Symbol, OrderDepth]
+    ) -> dict[Symbol, list]:
         return {
             sym: [od.buy_orders, od.sell_orders] for sym, od in order_depths.items()
         }
 
-    def compress_trades(self, trades: Dict[Symbol, List[Trade]]) -> List[List[Any]]:
+    def compress_trades(self, trades: dict[Symbol, list[Trade]]) -> list[list]:
         compressed = []
         for arr in trades.values():
             for t in arr:
@@ -91,7 +90,7 @@ class Logger:
                 )
         return compressed
 
-    def compress_observations(self, obs: Observation) -> List[Any]:
+    def compress_observations(self, obs: Observation) -> list:
         conv = {
             p: [
                 v.bidPrice,
@@ -106,14 +105,14 @@ class Logger:
         }
         return [obs.plainValueObservations, conv]
 
-    def compress_orders(self, orders: Dict[Symbol, List[Order]]) -> List[List[Any]]:
+    def compress_orders(self, orders: dict[Symbol, list[Order]]) -> list[list]:
         compressed = []
         for arr in orders.values():
             for o in arr:
                 compressed.append([o.symbol, o.price, o.quantity])
         return compressed
 
-    def to_json(self, v: Any) -> str:
+    def to_json(self, v) -> str:
         return json.dumps(v, cls=ProsperityEncoder, separators=(",", ":"))
 
     def truncate(self, value: str, max_length: int) -> str:
