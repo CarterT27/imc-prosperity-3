@@ -21,117 +21,133 @@ from datamodel import (
 
 class Logger:
     def __init__(self) -> None:
-        # lowered to preempt JSON-escaped growth
-        self.max_log_length = 2000
-        self.logs: str = ""
+        self.logs = ""
+        self.max_log_length = 3750
 
     def print(self, *objects, sep: str = " ", end: str = "\n") -> None:
         self.logs += sep.join(map(str, objects)) + end
 
-    def flush(
-        self,
-        state: TradingState,
-        orders: dict[Symbol, list[Order]],
-        conversions: int,
-        trader_data: str,
-    ) -> None:
-        # estimate base JSON length without dynamic fields
-        base_payload = [
-            self._partial_state(state, ""),
-            self.compress_orders(orders),
-            conversions,
-            "",
-            "",
-        ]
-        base_len = len(self.to_json(base_payload))
-        # evenly allocate remaining space
-        max_item = max((self.max_log_length - base_len) // 3, 0)
+    def flush(self, state: TradingState, orders: dict[Symbol, list[Order]], conversions: int, trader_data: str) -> None:
+        base_length = len(
+            self.to_json(
+                [
+                    self.compress_state(state, ""),
+                    self.compress_orders(orders),
+                    conversions,
+                    "",
+                    "",
+                ]
+            )
+        )
 
-        payload = [
-            self._partial_state(state, self.truncate(state.traderData, max_item)),
-            self.compress_orders(orders),
-            conversions,
-            self.truncate(trader_data, max_item),
-            self.truncate(self.logs, max_item),
-        ]
+        # We truncate state.traderData, trader_data, and self.logs to the same max. length to fit the log limit
+        max_item_length = (self.max_log_length - base_length) // 3
 
-        print(self.to_json(payload))
+        print(
+            self.to_json(
+                [
+                    self.compress_state(state, self.truncate(state.traderData, max_item_length)),
+                    self.compress_orders(orders),
+                    conversions,
+                    self.truncate(trader_data, max_item_length),
+                    self.truncate(self.logs, max_item_length),
+                ]
+            )
+        )
+
         self.logs = ""
 
-    def _partial_state(self, state: TradingState, trader_data: str) -> list:
-        # omit both trade lists to save space
+    def compress_state(self, state: TradingState, trader_data: str) -> list:
         return [
             state.timestamp,
             trader_data,
             self.compress_listings(state.listings),
             self.compress_order_depths(state.order_depths),
-            [],  # own_trades omitted
-            [],  # market_trades omitted
+            self.compress_trades(state.own_trades),
+            self.compress_trades(state.market_trades),
             state.position,
             self.compress_observations(state.observations),
         ]
 
     def compress_listings(self, listings: dict[Symbol, Listing]) -> list[list]:
-        return [[l.symbol, l.product, l.denomination] for l in listings.values()]
+        compressed = []
+        for listing in listings.values():
+            compressed.append([listing.symbol, listing.product, listing.denomination])
 
-    def compress_order_depths(
-        self, order_depths: dict[Symbol, OrderDepth]
-    ) -> dict[Symbol, list]:
-        return {
-            sym: [od.buy_orders, od.sell_orders] for sym, od in order_depths.items()
-        }
+        return compressed
+
+    def compress_order_depths(self, order_depths: dict[Symbol, OrderDepth]) -> dict[Symbol, list]:
+        compressed = {}
+        for symbol, order_depth in order_depths.items():
+            compressed[symbol] = [order_depth.buy_orders, order_depth.sell_orders]
+
+        return compressed
 
     def compress_trades(self, trades: dict[Symbol, list[Trade]]) -> list[list]:
         compressed = []
         for arr in trades.values():
-            for t in arr:
+            for trade in arr:
                 compressed.append(
-                    [t.symbol, t.price, t.quantity, t.buyer, t.seller, t.timestamp]
+                    [
+                        trade.symbol,
+                        trade.price,
+                        trade.quantity,
+                        trade.buyer,
+                        trade.seller,
+                        trade.timestamp,
+                    ]
                 )
+
         return compressed
 
-    def compress_observations(self, obs: Observation) -> list:
-        conv = {
-            p: [
-                v.bidPrice,
-                v.askPrice,
-                v.transportFees,
-                v.exportTariff,
-                v.importTariff,
-                v.sugarPrice,
-                v.sunlightIndex,
+    def compress_observations(self, observations: Observation) -> list:
+        conversion_observations = {}
+        for product, observation in observations.conversionObservations.items():
+            conversion_observations[product] = [
+                observation.bidPrice,
+                observation.askPrice,
+                observation.transportFees,
+                observation.exportTariff,
+                observation.importTariff,
+                observation.sugarPrice,
+                observation.sunlightIndex,
             ]
-            for p, v in obs.conversionObservations.items()
-        }
-        return [obs.plainValueObservations, conv]
+
+        return [observations.plainValueObservations, conversion_observations]
 
     def compress_orders(self, orders: dict[Symbol, list[Order]]) -> list[list]:
         compressed = []
         for arr in orders.values():
-            for o in arr:
-                compressed.append([o.symbol, o.price, o.quantity])
+            for order in arr:
+                compressed.append([order.symbol, order.price, order.quantity])
+
         return compressed
 
-    def to_json(self, v) -> str:
-        return json.dumps(v, cls=ProsperityEncoder, separators=(",", ":"))
+    def to_json(self, value) -> str:
+        return json.dumps(value, cls=ProsperityEncoder, separators=(",", ":"))
 
     def truncate(self, value: str, max_length: int) -> str:
-        # binary-search on JSON-encoded length to handle escaped chars
         lo, hi = 0, min(len(value), max_length)
-        best = ""
+        out = ""
+
         while lo <= hi:
             mid = (lo + hi) // 2
-            cand = value[:mid] + ("..." if mid < len(value) else "")
-            enc = json.dumps(cand)
-            if len(enc) <= max_length:
-                best = cand
+
+            candidate = value[:mid]
+            if len(candidate) < len(value):
+                candidate += "..."
+
+            encoded_candidate = json.dumps(candidate)
+
+            if len(encoded_candidate) <= max_length:
+                out = candidate
                 lo = mid + 1
             else:
                 hi = mid - 1
-        return best
+
+        return out
 
 
-# instantiate logger
 logger = Logger()
 
 
@@ -149,6 +165,18 @@ class Trader:
         self.croissants_vwap = []
         self.jams_vwap = []
         self.djembes_vwap = []
+        self.insider_id = "Olivia"
+        self.insider_tracked_products = ["SQUID_INK", "CROISSANTS"]
+
+        self.insider_regimes = {
+            "SQUID_INK": None,  # Can be "bullish", "bearish", or None
+            "CROISSANTS": None  # Can be "bullish", "bearish", or None
+        }
+        self.insider_last_trades = {
+            "SQUID_INK": [],
+            "CROISSANTS": []
+        }
+
         self.active_products = {
             "KELP": True,
             "RAINFOREST_RESIN": True,
@@ -1528,11 +1556,41 @@ class Trader:
 
         return orders, buy_order_volume, sell_order_volume
 
+    def process_insider_trades(self, state: TradingState) -> None:
+        for product in self.insider_tracked_products:
+            if product in state.market_trades:
+                for trade in state.market_trades[product]:
+                    # Check if the insider is involved in the trade
+                    if trade.buyer == self.insider_id or trade.seller == self.insider_id:
+                        # Determine if insider is buying or selling
+                        is_buying = trade.buyer == self.insider_id
+
+                        # Update regime based on insider's action
+                        if is_buying:
+                            self.insider_regimes[product] = "bullish"
+                        else:  # insider is selling
+                            self.insider_regimes[product] = "bearish"
+
+                        # Store the trade for further analysis, potentially not needed
+                        self.insider_last_trades[product].append({
+                            "timestamp": trade.timestamp,
+                            "price": trade.price,
+                            "quantity": trade.quantity,
+                            "is_buying": is_buying
+                        })
+
+                        # Limit the size of the trade history
+                        if len(self.insider_last_trades[product]) > 10:
+                            self.insider_last_trades[product].pop(0)
+
     def run(self, state: TradingState) -> tuple[dict[str, list[Order]], int, str]:
         try:
             result = {}
             conversions = 0
             trader_data = {}
+
+            # Process insider trades and update regimes
+            self.process_insider_trades(state)
 
             obs = state.observations
             if "MAGNIFICENT_MACARONS" in obs.conversionObservations:
@@ -1576,6 +1634,13 @@ class Trader:
                             )
                         if f"{prod}_vwap" in trader_data:
                             setattr(self, f"{prod}_vwap", trader_data[f"{prod}_vwap"])
+
+                    # Load insider trading data from trader_data if available
+                    if "insider_regimes" in trader_data:
+                        self.insider_regimes = trader_data["insider_regimes"]
+                    if "insider_last_trades" in trader_data:
+                        self.insider_last_trades = trader_data["insider_last_trades"]
+
                 except Exception as e:
                     logger.print(f"Could not parse trader data: {e}")
 
@@ -1816,6 +1881,10 @@ class Trader:
                     )
                     if orders:
                         result[product] = orders
+
+            # Save insider trading data in trader_data
+            trader_data["insider_regimes"] = self.insider_regimes
+            trader_data["insider_last_trades"] = self.insider_last_trades
 
             trader_data["past_volatilities"] = self.past_volatilities
             serialized_trader_data = jsonpickle.encode(trader_data)
