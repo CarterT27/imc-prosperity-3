@@ -178,20 +178,24 @@ class Trader:
         }
 
         # Basket statistical arbitrage constants
-        self.pb1_intercept = -2883.19
-        self.pb1_croissants_coef = 4.07
-        self.pb1_jams_coef = 3.74
-        self.pb1_djembes_coef = 1.47
+        self.pb1_intercept = 2023.97
+        self.pb1_croissants_coef = 6.87
+        self.pb1_jams_coef = 2.02
+        self.pb1_djembes_coef = 1.06
         
-        self.pb2_intercept = 6245.25
-        self.pb2_croissants_coef = 3.36
-        self.pb2_jams_coef = 1.47
+        self.pb2_intercept = 4684.05
+        self.pb2_croissants_coef = 3.14
+        self.pb2_jams_coef = 1.85
 
         # Basket equation constants
         self.pb1_intercept = 0
         self.pb1_croissants_coef = 6
         self.pb1_jams_coef = 3
         self.pb1_djembes_coef = 1
+
+        self.pb2_intercept = 0
+        self.pb2_croissants_coef = 4
+        self.pb2_jams_coef = 2
         
         # Define basket components for convert operations
         self.basket_components = {
