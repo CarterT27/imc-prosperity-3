@@ -177,6 +177,28 @@ class Trader:
             "CROISSANTS": []
         }
 
+        # Basket statistical arbitrage constants
+        self.pb1_intercept = -2883.19
+        self.pb1_croissants_coef = 4.07
+        self.pb1_jams_coef = 3.74
+        self.pb1_djembes_coef = 1.47
+        
+        self.pb2_intercept = 6245.25
+        self.pb2_croissants_coef = 3.36
+        self.pb2_jams_coef = 1.47
+
+        # Basket equation constants
+        self.pb1_intercept = 0
+        self.pb1_croissants_coef = 6
+        self.pb1_jams_coef = 3
+        self.pb1_djembes_coef = 1
+        
+        # Define basket components for convert operations
+        self.basket_components = {
+            "PICNIC_BASKET1": {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
+            "PICNIC_BASKET2": {"CROISSANTS": 4, "JAMS": 2}
+        }
+
         self.active_products = {
             "KELP": True,
             "RAINFOREST_RESIN": True,
@@ -556,7 +578,10 @@ class Trader:
             djembes_price = self.calculate_fair_value(state.order_depths["DJEMBES"])
             if None in [croissant_price, jams_price, djembes_price]:
                 return None
-            return 6 * croissant_price + 3 * jams_price + 1 * djembes_price
+            return (self.pb1_intercept + 
+                   self.pb1_croissants_coef * croissant_price + 
+                   self.pb1_jams_coef * jams_price + 
+                   self.pb1_djembes_coef * djembes_price)
         elif basket_type == "PICNIC_BASKET2":
             croissant_price = self.calculate_fair_value(
                 state.order_depths["CROISSANTS"]
@@ -564,7 +589,9 @@ class Trader:
             jams_price = self.calculate_fair_value(state.order_depths["JAMS"])
             if None in [croissant_price, jams_price]:
                 return None
-            return 4 * croissant_price + 2 * jams_price
+            return (self.pb2_intercept +
+                   self.pb2_croissants_coef * croissant_price +
+                   self.pb2_jams_coef * jams_price)
         return None
 
     def trade_basket_divergence(
@@ -643,10 +670,8 @@ class Trader:
         synthetic_order_depth = self.get_synthetic_basket_order_depth(
             state, basket_type
         )
-        if basket_type == "PICNIC_BASKET1":
-            components = {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1}
-        else:
-            components = {"CROISSANTS": 4, "JAMS": 2}
+        components = self.basket_components[basket_type]
+        
         if basket_order_depth.sell_orders and synthetic_order_depth.buy_orders:
             basket_ask = min(basket_order_depth.sell_orders.keys())
             synthetic_bid = max(synthetic_order_depth.buy_orders.keys())
@@ -1041,10 +1066,8 @@ class Trader:
         self, state: TradingState, basket_type: str
     ) -> OrderDepth:
         synthetic_order_depth = OrderDepth()
-        if basket_type == "PICNIC_BASKET1":
-            components = {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1}
-        else:
-            components = {"CROISSANTS": 4, "JAMS": 2}
+        components = self.basket_components[basket_type]
+        
         component_bids = {}
         component_asks = {}
         for product, weight in components.items():
@@ -1063,8 +1086,39 @@ class Trader:
                 )
             else:
                 component_asks[product] = float("inf")
-        implied_bid = sum(component_bids[p] * w for p, w in components.items())
-        implied_ask = sum(component_asks[p] * w for p, w in components.items())
+        
+        # Calculate implied prices using stat arb equations
+        if basket_type == "PICNIC_BASKET1":
+            if all(component_bids[p] > 0 for p in components):
+                implied_bid = (self.pb1_intercept + 
+                              self.pb1_croissants_coef * component_bids["CROISSANTS"] + 
+                              self.pb1_jams_coef * component_bids["JAMS"] + 
+                              self.pb1_djembes_coef * component_bids["DJEMBES"])
+            else:
+                implied_bid = 0
+                
+            if all(component_asks[p] < float("inf") for p in components):
+                implied_ask = (self.pb1_intercept + 
+                              self.pb1_croissants_coef * component_asks["CROISSANTS"] + 
+                              self.pb1_jams_coef * component_asks["JAMS"] + 
+                              self.pb1_djembes_coef * component_asks["DJEMBES"])
+            else:
+                implied_ask = float("inf")
+        else:  # PICNIC_BASKET2
+            if all(component_bids[p] > 0 for p in ["CROISSANTS", "JAMS"]):
+                implied_bid = (self.pb2_intercept + 
+                              self.pb2_croissants_coef * component_bids["CROISSANTS"] + 
+                              self.pb2_jams_coef * component_bids["JAMS"])
+            else:
+                implied_bid = 0
+                
+            if all(component_asks[p] < float("inf") for p in ["CROISSANTS", "JAMS"]):
+                implied_ask = (self.pb2_intercept + 
+                              self.pb2_croissants_coef * component_asks["CROISSANTS"] + 
+                              self.pb2_jams_coef * component_asks["JAMS"])
+            else:
+                implied_ask = float("inf")
+        
         if implied_bid > 0:
             bid_volumes = []
             for p, w in components.items():
