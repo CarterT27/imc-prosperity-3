@@ -468,61 +468,83 @@ class Trader:
         position_limit = self.position_limits["SQUID_INK"]
         if not order_depth.sell_orders or not order_depth.buy_orders:
             return orders
+        
         best_ask = min(order_depth.sell_orders.keys())
         best_bid = max(order_depth.buy_orders.keys())
         mid_price = (best_ask + best_bid) / 2
+        
         self.squid_ink_prices.append(mid_price)
         if len(self.squid_ink_prices) > max(self.timespan, self.squid_ink_mean_window):
             self.squid_ink_prices.pop(0)
+            
         if len(self.squid_ink_prices) < 10:
             return orders
+            
         recent_window = min(len(self.squid_ink_prices), self.squid_ink_mean_window)
         mean_price = sum(self.squid_ink_prices[-recent_window:]) / recent_window
+        
         if len(self.squid_ink_prices) >= 2:
             volatility = statistics.stdev(
                 self.squid_ink_prices[-min(10, len(self.squid_ink_prices)) :]
             )
         else:
             volatility = 0
+            
         deviation_pct = (
             abs(mid_price - mean_price) / mean_price if mean_price > 0 else 0
         )
+        
+        # Get the current regime from insider signals
+        current_regime = self.insider_regimes["SQUID_INK"]
+        
+        # Position management based on time in position
         if position != 0 and self.squid_ink_position_start_time > 0:
             time_in_position = state_timestamp - self.squid_ink_position_start_time
             if time_in_position >= self.squid_ink_max_position_time:
                 return self.close_position("SQUID_INK", order_depth, position)
+        
+        # Adjust strategy based on insider regime
         if position == 0:
-            if (
-                volatility > self.squid_ink_volatility_threshold
-                and deviation_pct > self.squid_ink_deviation_threshold
-            ):
-                if mid_price > mean_price:
+            # Opening new positions
+            if volatility > self.squid_ink_volatility_threshold and deviation_pct > self.squid_ink_deviation_threshold:
+                # If price is above mean and regime is bearish, take short position
+                if mid_price > mean_price and (current_regime != "bullish"):
                     quantity = min(order_depth.buy_orders[best_bid], position_limit)
                     if quantity > 0:
                         orders.append(Order("SQUID_INK", best_bid, -quantity))
                         self.squid_ink_position_start_time = state_timestamp
                         self.squid_ink_last_position = -quantity
-                elif mid_price < mean_price:
+                
+                # If price is below mean and regime is bullish, take long position
+                elif mid_price < mean_price and (current_regime != "bearish"):
                     quantity = min(-order_depth.sell_orders[best_ask], position_limit)
                     if quantity > 0:
                         orders.append(Order("SQUID_INK", best_ask, quantity))
                         self.squid_ink_position_start_time = state_timestamp
                         self.squid_ink_last_position = quantity
         else:
-            if position > 0 and mid_price >= mean_price:
-                quantity = min(position, order_depth.buy_orders[best_bid])
-                if quantity > 0:
-                    orders.append(Order("SQUID_INK", best_bid, -quantity))
-                    if quantity == position:
-                        self.squid_ink_position_start_time = 0
-                        self.squid_ink_last_position = 0
-            elif position < 0 and mid_price <= mean_price:
-                quantity = min(-position, -order_depth.sell_orders[best_ask])
-                if quantity > 0:
-                    orders.append(Order("SQUID_INK", best_ask, quantity))
-                    if quantity == -position:
-                        self.squid_ink_position_start_time = 0
-                        self.squid_ink_last_position = 0
+            # Managing existing positions
+            if position > 0:
+                # For long positions
+                if mid_price >= mean_price or current_regime == "bearish":
+                    # Close long position if price is at or above mean or regime turned bearish
+                    quantity = min(position, order_depth.buy_orders[best_bid])
+                    if quantity > 0:
+                        orders.append(Order("SQUID_INK", best_bid, -quantity))
+                        if quantity == position:
+                            self.squid_ink_position_start_time = 0
+                            self.squid_ink_last_position = 0
+            elif position < 0:
+                # For short positions
+                if mid_price <= mean_price or current_regime == "bullish":
+                    # Close short position if price is at or below mean or regime turned bullish
+                    quantity = min(-position, -order_depth.sell_orders[best_ask])
+                    if quantity > 0:
+                        orders.append(Order("SQUID_INK", best_ask, quantity))
+                        if quantity == -position:
+                            self.squid_ink_position_start_time = 0
+                            self.squid_ink_last_position = 0
+        
         return orders
 
     def calculate_synthetic_value(self, state: TradingState, basket_type: str) -> float:
