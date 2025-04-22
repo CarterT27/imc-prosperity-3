@@ -216,7 +216,7 @@ class Trader:
             "VOLCANIC_ROCK_VOUCHER_9500": False,
             "VOLCANIC_ROCK_VOUCHER_9750": True,
             "VOLCANIC_ROCK_VOUCHER_10000": True,
-            "VOLCANIC_ROCK_VOUCHER_10250": True,
+            "VOLCANIC_ROCK_VOUCHER_10250": False,
             "VOLCANIC_ROCK_VOUCHER_10500": False,
             "MAGNIFICENT_MACARONS": True,
         }
