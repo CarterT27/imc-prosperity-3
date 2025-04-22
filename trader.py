@@ -183,7 +183,7 @@ class Trader:
             "MAGNIFICENT_MACARONS": True,
         }
         self.config: Dict[str, float] = {
-            "CSI_THRESHOLD": 50,          # sunlight index cut‑off
+            "CSI_THRESHOLD": 0,          # sunlight index cut‑off
             "MAX_CONVERSION_LIMIT": 10,  # contractual daily cap
             "NORMAL_EDGE": 1.0,          # base edge (ticks) in normal regime
         }

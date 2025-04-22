@@ -4,3 +4,7 @@ numpy
 statistics
 typing
 jsonpickle
+requests
+beautifulsoup4
+selenium
+webdriver-manager
