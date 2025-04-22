@@ -188,12 +188,12 @@ class Trader:
         self.pb2_jams_coef = 1.85
 
         # Basket equation constants
-        self.pb1_intercept = 0
+        self.pb1_intercept = -57.71 # calculated from R1-3
         self.pb1_croissants_coef = 6
         self.pb1_jams_coef = 3
         self.pb1_djembes_coef = 1
 
-        self.pb2_intercept = 0
+        self.pb2_intercept = -22.59 # calculated from R1-3
         self.pb2_croissants_coef = 4
         self.pb2_jams_coef = 2
         
