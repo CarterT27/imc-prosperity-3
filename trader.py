@@ -1613,7 +1613,7 @@ class Trader:
         
         Args:
             state: The current trading state
-            product: The product to copy trades for (should be "CROISSANTS")
+            product: The product to copy trades for (should be "CROISSANTS" or "SQUID_INK")
         
         Returns:
             List of orders to execute
@@ -1803,12 +1803,13 @@ class Trader:
             if "MAGNIFICENT_MACARONS" in result:
                 handled.add("MAGNIFICENT_MACARONS")
             
-            # Special handling for CROISSANTS - copy Olivia's trades only
-            if "CROISSANTS" in state.order_depths and self.active_products.get("CROISSANTS", False):
-                croissants_orders = self.copy_olivia_trades(state, "CROISSANTS")
-                if croissants_orders:
-                    result["CROISSANTS"] = croissants_orders
-                handled.add("CROISSANTS")
+            # Special handling for CROISSANTS and SQUID_INK - copy Olivia's trades
+            for product in ["CROISSANTS", "SQUID_INK"]:
+                if product in state.order_depths and self.active_products.get(product, False):
+                    product_orders = self.copy_olivia_trades(state, product)
+                    if product_orders:
+                        result[product] = product_orders
+                    handled.add(product)
 
             # Handle vouchers and VOLCANIC_ROCK
             if "VOLCANIC_ROCK" in state.order_depths:
@@ -1911,18 +1912,17 @@ class Trader:
                                 result[product] = orders
                         else:
                             for p, orders in arbitrage_orders.items():
-                                # Only add orders for active products, but skip CROISSANTS
-                                # (CROISSANTS are traded only through copy_olivia_trades)
-                                if self.active_products.get(p, False) and p != "CROISSANTS":
+                                # Only add orders for active products, but skip CROISSANTS and SQUID_INK
+                                # (These are traded only through copy_olivia_trades)
+                                if self.active_products.get(p, False) and p not in ["CROISSANTS", "SQUID_INK"]:
                                     result.setdefault(p, []).extend(orders)
 
                 elif product in [
                     "KELP",
                     "RAINFOREST_RESIN",
-                    "SQUID_INK",
                     "JAMS",
                     "DJEMBES",
-                ]:  # Removed CROISSANTS from this list
+                ]:  # Removed CROISSANTS and SQUID_INK from this list
                     # Always perform calculations
                     if product == "KELP":
                         self.kelp_prices.append(
@@ -1956,7 +1956,7 @@ class Trader:
                             if orders:
                                 result[product] = orders
 
-                elif product in self.active_products and self.active_products[product] and product != "CROISSANTS":
+                elif product in self.active_products and self.active_products[product] and product not in ["CROISSANTS", "SQUID_INK"]:
                     orders = self.product_orders(
                         product, state.order_depths[product], position
                     )
