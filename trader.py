@@ -1583,6 +1583,65 @@ class Trader:
                         if len(self.insider_last_trades[product]) > 10:
                             self.insider_last_trades[product].pop(0)
 
+    def copy_olivia_trades(self, state: TradingState, product: str) -> list[Order]:
+        """
+        Copy Olivia's trades for a specific product.
+        If Olivia buys, we buy up to our position limit.
+        If Olivia sells, we sell up to our position limit.
+        
+        Args:
+            state: The current trading state
+            product: The product to copy trades for (should be "CROISSANTS")
+        
+        Returns:
+            List of orders to execute
+        """
+        orders = []
+        position_limit = self.position_limits[product]
+        current_position = state.position.get(product, 0)
+        
+        # Only process if there are market trades for this product
+        if product not in state.market_trades:
+            return orders
+        
+        # Find Olivia's trades in this tick
+        olivia_buy_qty = 0
+        olivia_sell_qty = 0
+        
+        for trade in state.market_trades[product]:
+            # Check if Olivia is involved in the trade
+            if trade.buyer == self.insider_id:
+                # Olivia is buying
+                olivia_buy_qty += trade.quantity
+            elif trade.seller == self.insider_id:
+                # Olivia is selling
+                olivia_sell_qty += trade.quantity
+        
+        # Create orders based on Olivia's trades
+        if olivia_buy_qty > 0:
+            # Olivia is buying, so we should buy too (up to position limit)
+            buy_quantity = min(position_limit - current_position, position_limit)
+            
+            # Only place order if we can buy something
+            if buy_quantity > 0 and product in state.order_depths and state.order_depths[product].sell_orders:
+                # Get best ask price
+                best_ask = min(state.order_depths[product].sell_orders.keys())
+                # Create buy order at the best ask price
+                orders.append(Order(product, best_ask, buy_quantity))
+        
+        if olivia_sell_qty > 0:
+            # Olivia is selling, so we should sell too (up to position limit)
+            sell_quantity = min(position_limit + current_position, position_limit)
+            
+            # Only place order if we can sell something
+            if sell_quantity > 0 and product in state.order_depths and state.order_depths[product].buy_orders:
+                # Get best bid price
+                best_bid = max(state.order_depths[product].buy_orders.keys())
+                # Create sell order at the best bid price
+                orders.append(Order(product, best_bid, -sell_quantity))
+        
+        return orders
+
     def run(self, state: TradingState) -> tuple[dict[str, list[Order]], int, str]:
         try:
             result = {}
@@ -1708,19 +1767,26 @@ class Trader:
                                     self.macaron_edge = max(
                                         0.5, self.macaron_edge * 0.9
                                     )
-                # If product is inactive but we have a position, try to close it
-                elif mac_position != 0:
-                    close_orders = self.close_position(
-                        "MAGNIFICENT_MACARONS", mac_order_depth, mac_position
-                    )
-                    if close_orders:
-                        result["MAGNIFICENT_MACARONS"] = close_orders
+            # If product is inactive but we have a position, try to close it
+            elif mac_position != 0:
+                close_orders = self.close_position(
+                    "MAGNIFICENT_MACARONS", mac_order_depth, mac_position
+                )
+                if close_orders:
+                    result["MAGNIFICENT_MACARONS"] = close_orders
 
-                    # Don't do any conversions when inactive
+                # Don't do any conversions when inactive
 
             handled = set()
             if "MAGNIFICENT_MACARONS" in result:
                 handled.add("MAGNIFICENT_MACARONS")
+            
+            # Special handling for CROISSANTS - copy Olivia's trades only
+            if "CROISSANTS" in state.order_depths and self.active_products.get("CROISSANTS", False):
+                croissants_orders = self.copy_olivia_trades(state, "CROISSANTS")
+                if croissants_orders:
+                    result["CROISSANTS"] = croissants_orders
+                handled.add("CROISSANTS")
 
             # Handle vouchers and VOLCANIC_ROCK
             if "VOLCANIC_ROCK" in state.order_depths:
@@ -1810,6 +1876,7 @@ class Trader:
 
                     # Only execute trades if the product is active
                     if self.active_products.get(product, False):
+                        # Execute basket arbitrage - don't skip for baskets
                         arbitrage_orders = self.execute_basket_arbitrage(state, product)
                         if not arbitrage_orders or product not in arbitrage_orders:
                             orders = self.trade_basket_divergence(
@@ -1822,18 +1889,18 @@ class Trader:
                                 result[product] = orders
                         else:
                             for p, orders in arbitrage_orders.items():
-                                # Only add orders for active products
-                                if self.active_products.get(p, False):
+                                # Only add orders for active products, but skip CROISSANTS
+                                # (CROISSANTS are traded only through copy_olivia_trades)
+                                if self.active_products.get(p, False) and p != "CROISSANTS":
                                     result.setdefault(p, []).extend(orders)
 
                 elif product in [
                     "KELP",
                     "RAINFOREST_RESIN",
                     "SQUID_INK",
-                    "CROISSANTS",
                     "JAMS",
                     "DJEMBES",
-                ]:
+                ]:  # Removed CROISSANTS from this list
                     # Always perform calculations
                     if product == "KELP":
                         self.kelp_prices.append(
@@ -1867,7 +1934,7 @@ class Trader:
                             if orders:
                                 result[product] = orders
 
-                elif product in self.active_products and self.active_products[product]:
+                elif product in self.active_products and self.active_products[product] and product != "CROISSANTS":
                     orders = self.product_orders(
                         product, state.order_depths[product], position
                     )
