@@ -360,12 +360,12 @@ class Trader:
         filtered_asks = [
             p
             for p in order_depth.sell_orders.keys()
-            if abs(order_depth.sell_orders[p]) >= 15
+            if abs(order_depth.sell_orders[p]) >= 10
         ]
         filtered_bids = [
             p
             for p in order_depth.buy_orders.keys()
-            if abs(order_depth.buy_orders[p]) >= 15
+            if abs(order_depth.buy_orders[p]) >= 10
         ]
         mm_ask = min(filtered_asks) if filtered_asks else best_ask
         mm_bid = max(filtered_bids) if filtered_bids else best_bid
