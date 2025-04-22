@@ -2,7 +2,6 @@ import json
 import math
 import statistics
 import typing
-from typing import Tuple
 
 import jsonpickle
 from typing import Any, List, Dict
@@ -182,11 +181,6 @@ class Trader:
             "VOLCANIC_ROCK_VOUCHER_10500": False,
             "MAGNIFICENT_MACARONS": True,
         }
-        self.config: Dict[str, float] = {
-            "CSI_THRESHOLD": 50,          # sunlight index cut‑off
-            "MAX_CONVERSION_LIMIT": 10,  # contractual daily cap
-            "NORMAL_EDGE": 1.0,          # base edge (ticks) in normal regime
-        }
         self.position_limits = {
             "KELP": 50,
             "RAINFOREST_RESIN": 50,
@@ -256,13 +250,14 @@ class Trader:
         self.max_volatility_history = 30
         self.cache = {}
         self.last_tick_time = 0
-        self.adaptive_edge = 1.0
         self.macaron_edge = 1.0
         self.macaron_target_vol = 10
         self.macaron_fill_history: list[int] = []
+        self.CSI_threshold = 50  # Threshold for determining low/high sunlight regime
         self.low_sun_regime = False
         self.timespan = 20
         self.cache: dict[str, float] = {}
+        self.macaron_min_buy_quantity = 20  # Minimum buy quantity in low sun regime
 
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         try:
@@ -743,6 +738,13 @@ class Trader:
         d1 = (math.log(S / K) + (r + sigma**2 / 2) * T) / (sigma * math.sqrt(T))
         return S * math.sqrt(T) * self.norm_pdf(d1)
 
+    def volatility_smile(self, strike: float, avg_strike: float, base_volatility: float) -> float:
+        # Simple model for volatility smile: higher vol for strikes further from the average
+        smile_factor = 0.08  # Adjust this factor to control the smile intensity
+        distance_from_avg = abs(strike - avg_strike) / avg_strike
+        smile_adjustment = smile_factor * distance_from_avg
+        return base_volatility + smile_adjustment
+
     def implied_volatility(
         self, option_price: float, S: float, K: float, T: float, r: float
     ) -> float:
@@ -753,9 +755,12 @@ class Trader:
             if option_price <= 0 or S <= 0 or K <= 0 or T <= 0:
                 return self.mean_volatility
             sigma = 0.5
+            avg_strike = sum(self.voucher_strikes.values()) / len(self.voucher_strikes)
             for _ in range(50):
-                price = self.black_scholes_call(S, K, T, r, sigma)
-                vega = self.black_scholes_vega(S, K, T, r, sigma)
+                # Apply volatility smile adjustment
+                adjusted_sigma = self.volatility_smile(K, avg_strike, sigma)
+                price = self.black_scholes_call(S, K, T, r, adjusted_sigma)
+                vega = self.black_scholes_vega(S, K, T, r, adjusted_sigma)
                 if vega == 0:
                     return self.mean_volatility
                 diff = option_price - price
@@ -1145,146 +1150,290 @@ class Trader:
 
         return implied_bid, implied_ask
 
-    def macaron_arb_take(self, od: OrderDepth, obs: Observation, pos: int) -> Tuple[List[Order], int, int]:
-        orders: List[Order] = []
-        limit = self.position_limits["MAGNIFICENT_MACARONS"]
-        buy_vol = sell_vol = 0
+    def macaron_arb_take(
+        self, order_depth: OrderDepth, observation: Observation, position: int
+    ) -> tuple[list[Order], int, int]:
+        """
+        Execute arbitrage take orders for Magnificent Macarons.
+        Takes advantage of mispriced orders relative to implied values and arbitrage between local and foreign markets.
+        Balances position in high sun regime to avoid extreme positions.
 
-        imp_bid, imp_ask = self.calculate_implied_bid_ask(obs, "MAGNIFICENT_MACARONS")
-        if imp_bid is None:
-            return orders, buy_vol, sell_vol
+        Args:
+            order_depth: Current order depth for macarons (local market)
+            observation: Current market observations (foreign market)
+            position: Current position in macarons
 
-        # --- setup ------------------------------------------------------
-        conv = obs.conversionObservations["MAGNIFICENT_MACARONS"]
+        Returns:
+            Tuple of (list of orders, buy volume, sell volume)
+        """
+        orders = []
+        position_limit = self.position_limits["MAGNIFICENT_MACARONS"]
+        buy_order_volume = 0
+        sell_order_volume = 0
+
+        # Calculate implied prices based on foreign market
+        implied_bid, implied_ask = self.calculate_implied_bid_ask(
+            observation, "MAGNIFICENT_MACARONS"
+        )
+        if implied_bid is None or implied_ask is None:
+            return orders, buy_order_volume, sell_order_volume
+
+        # Calculate foreign mid price
+        conv = observation.conversionObservations["MAGNIFICENT_MACARONS"]
         foreign_mid = (conv.bidPrice + conv.askPrice) / 2
-        if od.buy_orders and od.sell_orders:
-            local_mid = (max(od.buy_orders) + min(od.sell_orders)) / 2
-        else:
-            local_mid = None
 
+        # Calculate local mid price if available
+        local_mid = None
+        if order_depth.buy_orders and order_depth.sell_orders:
+            best_bid = max(order_depth.buy_orders.keys())
+            best_ask = min(order_depth.sell_orders.keys())
+            local_mid = (best_bid + best_ask) / 2
+
+        # Edge calculation - will be more aggressive in low sunlight regime
         edge_factor = 1.5 if self.low_sun_regime else 1.0
-        arb_thr = 0.5
-        pos_ratio = abs(pos) / limit if limit else 0.0
+        arb_threshold = (
+            0.5  # Minimum price difference to consider an arbitrage opportunity
+        )
 
-        # quantities we *could* still trade given current takes
-        buy_q_base = limit - pos
-        sell_q_base = limit + pos
+        # Position-based adjustments for order sizes
+        position_ratio = abs(position) / position_limit if position_limit > 0 else 0
 
-        # tighten exposure when inventory is stretched (normal regime only)
-        if not self.low_sun_regime and pos_ratio > 0.3:
-            scale = max(0.2, 1.0 - 1.5 * pos_ratio)
-            if pos > 0:
-                buy_q, sell_q = int(buy_q_base * scale), sell_q_base
+        # Calculate available quantities with position awareness
+        base_buy_quantity = position_limit - position
+        base_sell_quantity = position_limit + position
+
+        # In high sun regime, scale order sizes based on current position
+        if not self.low_sun_regime and position_ratio > 0.3:
+            # Position is getting significant, adjust order sizes
+            if position > 0:
+                # Long position - reduce buy orders, keep sell orders normal
+                buy_scale = max(
+                    0.2, 1.0 - (position_ratio * 1.5)
+                )  # Scale down buys more aggressively
+                sell_scale = 1.0
             else:
-                buy_q, sell_q = buy_q_base, int(sell_q_base * scale)
+                # Short position - reduce sell orders, keep buy orders normal
+                buy_scale = 1.0
+                sell_scale = max(
+                    0.2, 1.0 - (position_ratio * 1.5)
+                )  # Scale down sells more aggressively
+
+            buy_quantity = int(base_buy_quantity * buy_scale)
+            sell_quantity = int(base_sell_quantity * sell_scale)
         else:
-            buy_q, sell_q = buy_q_base, sell_q_base
+            # Normal order sizes
+            buy_quantity = base_buy_quantity
+            sell_quantity = base_sell_quantity
 
-        # --- LOW‑sun: one‑way accumulator -------------------------------
-        if self.low_sun_regime:
-            if buy_q > 0 and od.sell_orders:
-                for px in sorted(od.sell_orders):
-                    qty = min(-od.sell_orders[px], buy_q)
-                    if qty:
-                        orders.append(Order("MAGNIFICENT_MACARONS", px, qty))
-                        buy_vol += qty; buy_q -= qty
-                    if buy_q <= 0:
-                        break
-            return orders, buy_vol, sell_vol  # *no* selling in LOW‑sun
+        # If in low sun regime, buy aggressively at any price
+        if self.low_sun_regime and buy_quantity > 0 and order_depth.sell_orders:
+            # Sort sell orders by price (lowest first)
+            for price in sorted(list(order_depth.sell_orders.keys())):
+                # Take all available sell orders to maximize long position
+                quantity = min(abs(order_depth.sell_orders[price]), buy_quantity)
+                if quantity > 0:
+                    orders.append(Order("MAGNIFICENT_MACARONS", price, quantity))
+                    buy_order_volume += quantity
+                    buy_quantity -= quantity
 
-        # --- NORMAL regime: two‑way arbitrage & microstructure ----------
-        # thresholds widen if adding to stretched side
-        buy_thr = arb_thr * (1 + pos_ratio) if pos > 0 else arb_thr
-        sell_thr = arb_thr * (1 + pos_ratio) if pos < 0 else arb_thr
-
-        # 1) aggressive local vs implied ---------------------------------
-        if od.sell_orders and buy_q > 0:
-            best_ask = min(od.sell_orders)
-            if best_ask < imp_bid - buy_thr:
-                qty = min(-od.sell_orders[best_ask], buy_q)
-                orders.append(Order("MAGNIFICENT_MACARONS", best_ask, qty))
-                buy_vol += qty; buy_q -= qty
-
-        if od.buy_orders and sell_q > 0:
-            best_bid = max(od.buy_orders)
-            if best_bid > imp_ask + sell_thr:
-                qty = min(od.buy_orders[best_bid], sell_q)
-                orders.append(Order("MAGNIFICENT_MACARONS", best_bid, -qty))
-                sell_vol += qty; sell_q -= qty
-
-        # 2) mid‑to‑mid discrepancy --------------------------------------
-        if local_mid is not None and abs(local_mid - foreign_mid) > 2 * arb_thr:
-            if local_mid < foreign_mid and buy_q > 0 and od.sell_orders:
-                for px in sorted(od.sell_orders):
-                    if px >= foreign_mid - buy_thr:
-                        break
-                    qty = min(-od.sell_orders[px], buy_q)
-                    orders.append(Order("MAGNIFICENT_MACARONS", px, qty))
-                    buy_vol += qty; buy_q -= qty
-            elif local_mid > foreign_mid and sell_q > 0 and od.buy_orders:
-                for px in sorted(od.buy_orders, reverse=True):
-                    if px <= foreign_mid + sell_thr:
-                        break
-                    qty = min(od.buy_orders[px], sell_q)
-                    orders.append(Order("MAGNIFICENT_MACARONS", px, -qty))
-                    sell_vol += qty; sell_q -= qty
-
-        # 3) small opportunistic sweeps ----------------------------------
-        buy_edge = self.adaptive_edge * edge_factor * (1 + pos_ratio if pos > 0 else 1)
-        sell_edge = self.adaptive_edge * edge_factor * (1 + pos_ratio if pos < 0 else 1)
-
-        if buy_q > 0 and od.sell_orders:
-            for px in sorted(od.sell_orders):
-                if px > imp_bid - buy_edge:
+                # Stop if we've filled our buy quantity
+                if buy_quantity <= 0:
                     break
-                qty = min(-od.sell_orders[px], buy_q)
-                orders.append(Order("MAGNIFICENT_MACARONS", px, qty))
-                buy_vol += qty; buy_q -= qty
+        else:
+            # High sunlight regime - look for arbitrage opportunities with position awareness
 
-        if sell_q > 0 and od.buy_orders:
-            for px in sorted(od.buy_orders, reverse=True):
-                if px < imp_ask + sell_edge:
-                    break
-                qty = min(od.buy_orders[px], sell_q)
-                orders.append(Order("MAGNIFICENT_MACARONS", px, -qty))
-                sell_vol += qty; sell_q -= qty
+            # Calculate profitability thresholds - adjust based on position
+            buy_threshold = arb_threshold
+            sell_threshold = arb_threshold
 
-        return orders, buy_vol, sell_vol
+            # Make thresholds stricter for orders that increase existing position bias
+            if position_ratio > 0.5:
+                if position > 0:
+                    # Long position - make buy threshold stricter
+                    buy_threshold = arb_threshold * (1 + position_ratio)
+                else:
+                    # Short position - make sell threshold stricter
+                    sell_threshold = arb_threshold * (1 + position_ratio)
+
+            # 1. If local ask price is significantly below the implied bid, buy locally
+            if order_depth.sell_orders and buy_quantity > 0:
+                best_ask = min(order_depth.sell_orders.keys())
+                if best_ask < implied_bid - buy_threshold:
+                    # Profitable to buy locally and export to foreign market
+                    quantity = min(abs(order_depth.sell_orders[best_ask]), buy_quantity)
+                    if quantity > 0:
+                        orders.append(Order("MAGNIFICENT_MACARONS", best_ask, quantity))
+                        buy_order_volume += quantity
+                        buy_quantity -= quantity
+
+            # 2. If local bid price is significantly above the implied ask, sell locally
+            if order_depth.buy_orders and sell_quantity > 0:
+                best_bid = max(order_depth.buy_orders.keys())
+                if best_bid > implied_ask + sell_threshold:
+                    # Profitable to sell locally and import from foreign market
+                    quantity = min(abs(order_depth.buy_orders[best_bid]), sell_quantity)
+                    if quantity > 0:
+                        orders.append(
+                            Order("MAGNIFICENT_MACARONS", best_bid, -quantity)
+                        )
+                        sell_order_volume += quantity
+                        sell_quantity -= quantity
+
+            # 3. Compare market mid prices for broader arbitrage opportunities
+            if (
+                local_mid is not None
+                and abs(local_mid - foreign_mid) > 2 * arb_threshold
+            ):
+                # Local market is significantly mispriced relative to foreign market
+                if local_mid < foreign_mid and buy_quantity > 0:
+                    # Local market is underpriced - buy locally
+                    if order_depth.sell_orders:
+                        for price in sorted(list(order_depth.sell_orders.keys())):
+                            if price < foreign_mid - buy_threshold:
+                                quantity = min(
+                                    abs(order_depth.sell_orders[price]), buy_quantity
+                                )
+                                if quantity > 0:
+                                    orders.append(
+                                        Order("MAGNIFICENT_MACARONS", price, quantity)
+                                    )
+                                    buy_order_volume += quantity
+                                    buy_quantity -= quantity
+                            else:
+                                break
+                elif local_mid > foreign_mid and sell_quantity > 0:
+                    # Local market is overpriced - sell locally
+                    if order_depth.buy_orders:
+                        for price in sorted(
+                            list(order_depth.buy_orders.keys()), reverse=True
+                        ):
+                            if price > foreign_mid + sell_threshold:
+                                quantity = min(
+                                    abs(order_depth.buy_orders[price]), sell_quantity
+                                )
+                                if quantity > 0:
+                                    orders.append(
+                                        Order("MAGNIFICENT_MACARONS", price, -quantity)
+                                    )
+                                    sell_order_volume += quantity
+                                    sell_quantity -= quantity
+                            else:
+                                break
+
+            # 4. Standard take orders based on implied prices (aggressive taking)
+            # Use dynamic edge based on position
+            buy_edge = self.macaron_edge * edge_factor
+            sell_edge = self.macaron_edge * edge_factor
+
+            # Apply stricter edges when position is biased
+            if position_ratio > 0.4:
+                if position > 0:
+                    # Long position - stricter buy edge, looser sell edge
+                    buy_edge *= 1 + position_ratio
+                else:
+                    # Short position - looser buy edge, stricter sell edge
+                    sell_edge *= 1 + position_ratio
+
+            if buy_quantity > 0 and order_depth.sell_orders:
+                for price in sorted(list(order_depth.sell_orders.keys())):
+                    # Stop if price is too high relative to implied bid
+                    if price > implied_bid - buy_edge:
+                        break
+
+                    # Take the order if it's below our threshold
+                    quantity = min(abs(order_depth.sell_orders[price]), buy_quantity)
+                    if quantity > 0:
+                        orders.append(Order("MAGNIFICENT_MACARONS", price, quantity))
+                        buy_order_volume += quantity
+                        buy_quantity -= quantity
+
+            if sell_quantity > 0 and order_depth.buy_orders:
+                for price in sorted(list(order_depth.buy_orders.keys()), reverse=True):
+                    # Stop if price is too low relative to implied ask
+                    if price < implied_ask + sell_edge:
+                        break
+
+                    # Take the order if it's above our threshold
+                    quantity = min(abs(order_depth.buy_orders[price]), sell_quantity)
+                    if quantity > 0:
+                        orders.append(Order("MAGNIFICENT_MACARONS", price, -quantity))
+                        sell_order_volume += quantity
+                        sell_quantity -= quantity
+
+        return orders, buy_order_volume, sell_order_volume
 
     def macaron_arb_clear(self, position: int, observation: Observation) -> int:
         """
-        Calculate how many macarons to import (negative) or export (positive).
-        """
-        MAX = int(self.config["MAX_CONVERSION_LIMIT"])
+        Calculate how many macarons to import from or export to the foreign island.
 
-        # 1) LOW‑sun: only import to build long positions, never export
+        Args:
+            position: Current position in macarons
+            observation: Current market observations
+
+        Returns:
+            Number of units to convert (negative = import macarons, positive = export macarons)
+            Note: This directly corresponds to the 'conversions' value in the trading interface
+        """
+        # Maximum allowed conversion limit
+        MAX_CONVERSION_LIMIT = 10
+
+        # In low sun regime, focus on importing macarons to maintain maximum long position
         if self.low_sun_regime:
+            # Only import macarons to clear negative position
             if position < 0:
-                # import up to clear negative position
-                return max(-MAX, -position)
+                # Negative return value = import macarons from foreign island
+                # Limit to maximum conversion amount
+                return max(-MAX_CONVERSION_LIMIT, -position)
+            # Never export macarons in low sun regime
             return 0
 
-        # 2) NORMAL: compute a target based on implied foreign/local arbitrage
-        conv = observation.conversionObservations.get("MAGNIFICENT_MACARONS")
-        if conv:
-            imp_bid = conv.bidPrice - conv.exportTariff - conv.transportFees - 0.1
-            imp_ask = conv.askPrice + conv.importTariff + conv.transportFees
-            spread = imp_bid - imp_ask
+        # In normal regime, check for arbitrage opportunities from price differences
+        if "MAGNIFICENT_MACARONS" in observation.conversionObservations:
+            conv = observation.conversionObservations["MAGNIFICENT_MACARONS"]
 
-            # if there's a meaningful edge, tilt towards slightly long/short
-            EDGE = float(self.config["NORMAL_EDGE"])
-            if abs(spread) > EDGE:
-                # positive spread → imp_bid > imp_ask → export is profitable
-                target = 10 if spread > 0 else -10
-                desired = target - position
-                # clamp to ±MAX
-                return max(-MAX, min(MAX, desired))
+            # Calculate implied prices from foreign market
+            implied_bid = conv.bidPrice - conv.exportTariff - conv.transportFees - 0.1
+            implied_ask = conv.askPrice + conv.importTariff + conv.transportFees
 
-        # 3) FALLBACK: no signal → nudge position back toward zero by up to MAX
-        if position != 0:
-            adj = min(MAX, abs(position))
-            return adj if position > 0 else -adj
+            # Calculate trade profitability
+            bid_ask_spread = implied_ask - implied_bid
 
+            # Fixed import/export costs (transaction costs, slippage, etc.)
+            trade_threshold = 1.0
+
+            # Calculate target position based on implied prices
+            target_position = 0
+
+            # If the spread indicates good trading conditions, consider a more balanced position
+            if bid_ask_spread < trade_threshold:
+                # Aim for a balanced position that's slightly long or short based on market conditions
+                if implied_bid > implied_ask:
+                    # Market is favorable for exporting - bias slightly long
+                    target_position = 10
+                else:
+                    # Market is favorable for importing - bias slightly short
+                    target_position = -10
+            else:
+                # Larger spread - stay closer to neutral
+                target_position = 0
+
+            # Calculate position adjustment needed
+            position_adjustment = target_position - position
+
+            # Limit adjustment to MAX_CONVERSION_LIMIT
+            if position_adjustment > 0:
+                # Need to import (negative conversion value)
+                return max(-MAX_CONVERSION_LIMIT, -position_adjustment)
+            else:
+                # Need to export (positive conversion value)
+                return min(MAX_CONVERSION_LIMIT, -position_adjustment)
+
+        # Default: clear half the position if it's significant, otherwise leave it
+        if abs(position) > 20:
+            if position > 0:
+                return min(MAX_CONVERSION_LIMIT, -position // 2)
+            else:
+                return max(-MAX_CONVERSION_LIMIT, -position // 2)
         return 0
 
     def macaron_arb_make(
@@ -1341,7 +1490,7 @@ class Trader:
                 else:
                     # No sell orders available, need to place competitive bid
                     # Use highest bid and add 1 to be competitive, or implied bid + edge
-                    edge = self.adaptive_edge * 1.5  # Larger edge in low sun regime
+                    edge = self.macaron_edge * 1.5  # Larger edge in low sun regime
 
                     if order_depth.buy_orders:
                         best_bid = max(order_depth.buy_orders.keys())
@@ -1361,7 +1510,7 @@ class Trader:
             # High sunlight regime - balanced market making with arbitrage awareness
 
             # Calculate base edge
-            edge = self.adaptive_edge * 1.0
+            edge = self.macaron_edge * 1.0
             arb_threshold = 0.5  # Same as in take function
 
             # Adjust market making prices based on foreign-local mid price difference
@@ -1550,10 +1699,22 @@ class Trader:
             conversions = 0
             trader_data = {}
 
-            # --- 1) Process insider trades and update sunshine regime
+            # Process insider trades and update regimes
             self.process_insider_trades(state)
+
             obs = state.observations
-            self._update_regime(obs)
+            if "MAGNIFICENT_MACARONS" in obs.conversionObservations:
+                # Get current sunlight index directly from observation
+                current_sun = obs.conversionObservations[
+                    "MAGNIFICENT_MACARONS"
+                ].sunlightIndex
+                previous_regime = self.low_sun_regime
+
+                # Simple check against threshold
+                if current_sun < self.CSI_threshold:
+                    self.low_sun_regime = True
+                else:
+                    self.low_sun_regime = False
 
             current_day = state.timestamp // 1000000
             if current_day != self.current_day:
@@ -1593,24 +1754,79 @@ class Trader:
                 except Exception as e:
                     logger.print(f"Could not parse trader data: {e}")
 
-            # --- 2) Compute macarons conversions based on sunlight and arbitrage
-            mac_pos = state.position.get("MAGNIFICENT_MACARONS", 0)
-            conversions = self.macaron_arb_clear(mac_pos, obs)
+            if "MAGNIFICENT_MACARONS" in state.order_depths:
+                mac_position = state.position.get("MAGNIFICENT_MACARONS", 0)
+                mac_order_depth = state.order_depths["MAGNIFICENT_MACARONS"]
 
-            # --- 3) Macarons take/make orders
-            mac_od = state.order_depths.get("MAGNIFICENT_MACARONS")
-            if mac_od and self.active_products.get("MAGNIFICENT_MACARONS", False):
-                take_orders, buy_vol, sell_vol = self.macaron_arb_take(mac_od, obs, mac_pos)
-                make_orders, _, _ = self.macaron_arb_make(mac_od, obs, mac_pos, buy_vol, sell_vol)
-                if take_orders or make_orders:
-                    result["MAGNIFICENT_MACARONS"] = take_orders + make_orders
+                # Only trade if the product is active
+                if self.active_products.get("MAGNIFICENT_MACARONS", False):
+                    # Call the arbitrage take method
+                    mac_take_orders, buy_volume, sell_volume = self.macaron_arb_take(
+                        mac_order_depth, obs, mac_position
+                    )
+
+                    # Call the arbitrage make method
+                    mac_make_orders, _, _ = self.macaron_arb_make(
+                        mac_order_depth, obs, mac_position, buy_volume, sell_volume
+                    )
+
+                    # If we have orders to execute, clear the position and send orders
+                    if mac_take_orders or mac_make_orders:
+                        # Convert existing position to bring it back to zero
+                        # In low sun regime, maintain maximum long position
+                        conversions = self.macaron_arb_clear(mac_position, obs)
+
+                        # Combine all orders
+                        result["MAGNIFICENT_MACARONS"] = (
+                            mac_take_orders + mac_make_orders
+                        )
+
+                        # Track fill history for adaptive edge
+                        new_fills = sum(
+                            order.quantity
+                            for order in mac_take_orders
+                            if order.quantity > 0
+                        )
+                        new_fills += sum(
+                            -order.quantity
+                            for order in mac_take_orders
+                            if order.quantity < 0
+                        )
+                        if new_fills > 0:
+                            self.macaron_fill_history.append(new_fills)
+                            if (
+                                len(self.macaron_fill_history) > 10
+                            ):  # Keep last 10 fills
+                                self.macaron_fill_history.pop(0)
+
+                        # Adjust edge based on fill history
+                        if len(self.macaron_fill_history) >= 5:
+                            avg_fill = sum(self.macaron_fill_history) / len(
+                                self.macaron_fill_history
+                            )
+                            if self.low_sun_regime:
+                                # In low sun regime, be extremely aggressive with edge
+                                self.macaron_edge = max(0.1, self.macaron_edge * 0.8)
+                            else:
+                                if avg_fill > self.macaron_target_vol * 1.5:
+                                    # Too many fills, increase edge
+                                    self.macaron_edge = min(
+                                        2.0, self.macaron_edge * 1.1
+                                    )
+                                elif avg_fill < self.macaron_target_vol * 0.5:
+                                    # Too few fills, decrease edge
+                                    self.macaron_edge = max(
+                                        0.5, self.macaron_edge * 0.9
+                                    )
             # If product is inactive but we have a position, try to close it
-            elif mac_pos != 0:
+            elif mac_position != 0:
                 close_orders = self.close_position(
-                    "MAGNIFICENT_MACARONS", mac_od, mac_pos
+                    "MAGNIFICENT_MACARONS", mac_order_depth, mac_position
                 )
                 if close_orders:
                     result["MAGNIFICENT_MACARONS"] = close_orders
+
+                # Don't do any conversions when inactive
 
             handled = set()
             if "MAGNIFICENT_MACARONS" in result:
@@ -1797,14 +2013,3 @@ class Trader:
         except Exception as e:
             logger.print(f"Error in run method: {e}")
             return {}, 0, "{}"
-
-    def _update_regime(self, obs: Observation) -> None:
-        """Compute sunlight regime & emit log on change."""
-        if "MAGNIFICENT_MACARONS" not in obs.conversionObservations:
-            return
-        sun = obs.conversionObservations["MAGNIFICENT_MACARONS"].sunlightIndex
-        prev = getattr(self, "low_sun_regime", False)
-        self.low_sun_regime = sun < self.config["CSI_THRESHOLD"]
-        if self.low_sun_regime != prev:
-            regime = "LOW" if self.low_sun_regime else "NORMAL"
-            logger.print(f"Regime switch → {regime} (CSI {sun:.1f})")

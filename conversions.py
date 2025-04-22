@@ -1,12 +1,23 @@
 import json
 import math
 import statistics
-import typing
-from typing import Tuple
+from typing import Any, Dict, List, Tuple
 
 import jsonpickle
-from typing import Any, List, Dict
-from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
+import numpy as np
+import pandas as pd
+
+from datamodel import (
+    Listing,
+    Observation,
+    Order,
+    OrderDepth,
+    ProsperityEncoder,
+    Symbol,
+    Trade,
+    TradingState,
+)
+
 
 class Logger:
     def __init__(self) -> None:
@@ -173,13 +184,13 @@ class Trader:
             "JAMS": True,
             "DJEMBES": True,
             "PICNIC_BASKET1": True,
-            "PICNIC_BASKET2": False,
-            "VOLCANIC_ROCK": False,
-            "VOLCANIC_ROCK_VOUCHER_9500": False,
+            "PICNIC_BASKET2": True,
+            "VOLCANIC_ROCK": True,
+            "VOLCANIC_ROCK_VOUCHER_9500": True,
             "VOLCANIC_ROCK_VOUCHER_9750": True,
             "VOLCANIC_ROCK_VOUCHER_10000": True,
-            "VOLCANIC_ROCK_VOUCHER_10250": False,
-            "VOLCANIC_ROCK_VOUCHER_10500": False,
+            "VOLCANIC_ROCK_VOUCHER_10250": True,
+            "VOLCANIC_ROCK_VOUCHER_10500": True,
             "MAGNIFICENT_MACARONS": True,
         }
         self.config: Dict[str, float] = {
@@ -256,13 +267,13 @@ class Trader:
         self.max_volatility_history = 30
         self.cache = {}
         self.last_tick_time = 0
-        self.adaptive_edge = 1.0
-        self.macaron_edge = 1.0
+        self.adaptive_edge: float = 1.0
         self.macaron_target_vol = 10
         self.macaron_fill_history: list[int] = []
         self.low_sun_regime = False
         self.timespan = 20
         self.cache: dict[str, float] = {}
+        self.macaron_min_buy_quantity = 20  # Minimum buy quantity in low sun regime
 
     def calculate_fair_value(self, order_depth: OrderDepth) -> float:
         try:
@@ -326,12 +337,12 @@ class Trader:
         filtered_asks = [
             p
             for p in order_depth.sell_orders.keys()
-            if abs(order_depth.sell_orders[p]) >= 10
+            if abs(order_depth.sell_orders[p]) >= 15
         ]
         filtered_bids = [
             p
             for p in order_depth.buy_orders.keys()
-            if abs(order_depth.buy_orders[p]) >= 10
+            if abs(order_depth.buy_orders[p]) >= 15
         ]
         mm_ask = min(filtered_asks) if filtered_asks else best_ask
         mm_bid = max(filtered_bids) if filtered_bids else best_bid
@@ -1485,6 +1496,17 @@ class Trader:
                         if len(self.insider_last_trades[product]) > 10:
                             self.insider_last_trades[product].pop(0)
 
+    def _update_regime(self, obs: Observation) -> None:
+        """Compute sunlight regime & emit log on change."""
+        if "MAGNIFICENT_MACARONS" not in obs.conversionObservations:
+            return
+        sun = obs.conversionObservations["MAGNIFICENT_MACARONS"].sunlightIndex
+        prev = getattr(self, "low_sun_regime", False)
+        self.low_sun_regime = sun < self.config["CSI_THRESHOLD"]
+        if self.low_sun_regime != prev:
+            regime = "LOW" if self.low_sun_regime else "NORMAL"
+            logger.print(f"Regime switch → {regime} (CSI {sun:.1f})")
+
     def copy_olivia_trades(self, state: TradingState, product: str) -> list[Order]:
         """
         Copy Olivia's trades for a specific product.
@@ -1546,52 +1568,12 @@ class Trader:
 
     def run(self, state: TradingState) -> tuple[dict[str, list[Order]], int, str]:
         try:
-            result = {}
-            conversions = 0
-            trader_data = {}
+            result: Dict[str, List[Order]] = {}
 
             # --- 1) Process insider trades and update sunshine regime
             self.process_insider_trades(state)
             obs = state.observations
             self._update_regime(obs)
-
-            current_day = state.timestamp // 1000000
-            if current_day != self.current_day:
-                self.daily_pnl = 0
-                self.current_day = current_day
-
-            # Update days_to_expiry based on current timestamp
-            days_remaining = max(0, 7 - current_day)
-            self.days_to_expiry = days_remaining
-
-            if state.traderData and state.traderData != "SAMPLE":
-                try:
-                    trader_data = jsonpickle.decode(state.traderData)
-                    if "past_volatilities" in trader_data:
-                        self.past_volatilities = trader_data["past_volatilities"]
-                    for prod in [
-                        "kelp",
-                        "resin",
-                        "squid_ink",
-                        "croissants",
-                        "jams",
-                        "djembes",
-                    ]:
-                        if f"{prod}_prices" in trader_data:
-                            setattr(
-                                self, f"{prod}_prices", trader_data[f"{prod}_prices"]
-                            )
-                        if f"{prod}_vwap" in trader_data:
-                            setattr(self, f"{prod}_vwap", trader_data[f"{prod}_vwap"])
-
-                    # Load insider trading data from trader_data if available
-                    if "insider_regimes" in trader_data:
-                        self.insider_regimes = trader_data["insider_regimes"]
-                    if "insider_last_trades" in trader_data:
-                        self.insider_last_trades = trader_data["insider_last_trades"]
-
-                except Exception as e:
-                    logger.print(f"Could not parse trader data: {e}")
 
             # --- 2) Compute macarons conversions based on sunlight and arbitrage
             mac_pos = state.position.get("MAGNIFICENT_MACARONS", 0)
@@ -1599,212 +1581,116 @@ class Trader:
 
             # --- 3) Macarons take/make orders
             mac_od = state.order_depths.get("MAGNIFICENT_MACARONS")
-            if mac_od and self.active_products.get("MAGNIFICENT_MACARONS", False):
+            if mac_od:
                 take_orders, buy_vol, sell_vol = self.macaron_arb_take(mac_od, obs, mac_pos)
                 make_orders, _, _ = self.macaron_arb_make(mac_od, obs, mac_pos, buy_vol, sell_vol)
                 if take_orders or make_orders:
                     result["MAGNIFICENT_MACARONS"] = take_orders + make_orders
-            # If product is inactive but we have a position, try to close it
-            elif mac_pos != 0:
-                close_orders = self.close_position(
-                    "MAGNIFICENT_MACARONS", mac_od, mac_pos
-                )
-                if close_orders:
-                    result["MAGNIFICENT_MACARONS"] = close_orders
 
-            handled = set()
-            if "MAGNIFICENT_MACARONS" in result:
-                handled.add("MAGNIFICENT_MACARONS")
-            
-            # Special handling for CROISSANTS and SQUID_INK - copy Olivia's trades
+            # --- 4) Copy Olivia's trades for CROISSANTS & SQUID_INK
             for product in ["CROISSANTS", "SQUID_INK"]:
                 if product in state.order_depths and self.active_products.get(product, False):
-                    product_orders = self.copy_olivia_trades(state, product)
-                    if product_orders:
-                        result[product] = product_orders
-                    handled.add(product)
+                    orders = self.copy_olivia_trades(state, product)
+                    if orders:
+                        result[product] = orders
 
-            # Handle vouchers and VOLCANIC_ROCK
+            # --- 5) Handle Volcanic Rock & Vouchers
             if "VOLCANIC_ROCK" in state.order_depths:
-                rock_position = state.position.get("VOLCANIC_ROCK", 0)
-                rock_order_depth = state.order_depths["VOLCANIC_ROCK"]
-                rock_mid = self.calculate_fair_value(rock_order_depth)
+                rock_pos = state.position.get("VOLCANIC_ROCK", 0)
+                rock_od = state.order_depths["VOLCANIC_ROCK"]
+                rock_mid = self.calculate_fair_value(rock_od)
 
-                # Always process vouchers
+                # Process vouchers
                 if rock_mid is not None:
-                    voucher_positions = {}
-                    voucher_deltas = {}
+                    # Find arbitrage opportunities across vouchers
+                    arb_orders = self.find_arbitrage_opportunities(state, rock_od, rock_mid)
+                    if arb_orders:
+                        for order in arb_orders:
+                            if order.symbol not in result:
+                                result[order.symbol] = []
+                            result[order.symbol].append(order)
+
+                    # Process each voucher
                     for voucher_symbol in self.voucher_strikes.keys():
-                        if voucher_symbol in state.order_depths:
-                            try:
-                                voucher_position = state.position.get(voucher_symbol, 0)
-                                voucher_positions[voucher_symbol] = voucher_position
+                        if voucher_symbol in state.order_depths and self.active_products.get(voucher_symbol, False):
+                            voucher_od = state.order_depths[voucher_symbol]
+                            voucher_pos = state.position.get(voucher_symbol, 0)
+                            
+                            # Get orders for this voucher
+                            take_orders, make_orders = self.volcanic_rock_voucher_orders(
+                                state,
+                                rock_od,
+                                rock_pos,
+                                voucher_symbol,
+                                voucher_od,
+                                voucher_pos,
+                                {}  # Empty dict as we don't need trader data here
+                            )
+                            
+                            # Add orders to result
+                            if take_orders:
+                                if voucher_symbol not in result:
+                                    result[voucher_symbol] = []
+                                result[voucher_symbol].extend(take_orders)
+                            if make_orders:
+                                if voucher_symbol not in result:
+                                    result[voucher_symbol] = []
+                                result[voucher_symbol].extend(make_orders)
 
-                                # Only generate orders if the voucher is active
-                                if self.active_products.get(voucher_symbol, False):
-                                    take_orders, make_orders = (
-                                        self.volcanic_rock_voucher_orders(
-                                            state,
-                                            rock_order_depth,
-                                            rock_position,
-                                            voucher_symbol,
-                                            state.order_depths[voucher_symbol],
-                                            voucher_position,
-                                            trader_data,
-                                        )
-                                    )
-                                    if take_orders or make_orders:
-                                        result.setdefault(voucher_symbol, []).extend(
-                                            take_orders + make_orders
-                                        )
-                                # If inactive but has position, try to close it
-                                elif voucher_position != 0:
-                                    close_orders = self.close_position(
-                                        voucher_symbol,
-                                        state.order_depths[voucher_symbol],
-                                        voucher_position,
-                                    )
-                                    if close_orders:
-                                        result.setdefault(voucher_symbol, []).extend(
-                                            close_orders
-                                        )
-                            except Exception as e:
-                                logger.print(
-                                    f"Error processing voucher {voucher_symbol}: {e}"
-                                )
+                # Process Volcanic Rock orders
+                rock_orders = self.volcanic_rock_orders(rock_od, rock_pos, state)
+                if rock_orders:
+                    result["VOLCANIC_ROCK"] = rock_orders
 
-                # Only trade VOLCANIC_ROCK if it's active
-                if self.active_products.get("VOLCANIC_ROCK", False):
-                    if rock_mid is not None:
-                        arbitrage_orders = self.find_arbitrage_opportunities(
-                            state, rock_order_depth, rock_mid
-                        )
-                        if arbitrage_orders:
-                            for order in arbitrage_orders:
-                                result.setdefault(order.symbol, []).append(order)
-
-                    vol_orders = self.volcanic_rock_orders(
-                        rock_order_depth, rock_position, state
-                    )
-                    if vol_orders:
-                        result.setdefault("VOLCANIC_ROCK", []).extend(vol_orders)
-                # If VOLCANIC_ROCK is not active but we have a position, close it
-                elif rock_position != 0:
-                    orders = self.close_position(
-                        "VOLCANIC_ROCK", rock_order_depth, rock_position
-                    )
-                    if orders:
-                        result["VOLCANIC_ROCK"] = orders
-
-                handled.add("VOLCANIC_ROCK")
-                handled.update(self.voucher_strikes.keys())
-
-            # Handle other products
-            for product in state.order_depths.keys():
-                if product in handled:
+            # --- 6) Other products: baskets, simple market-making, closing inactive
+            for product, od in state.order_depths.items():
+                if product in result or product == "MAGNIFICENT_MACARONS":
                     continue
-
-                position = state.position.get(product, 0)
-
-                if product in ["PICNIC_BASKET1", "PICNIC_BASKET2"]:
-                    # Always calculate synthetic values for baskets
+                
+                pos = state.position.get(product, 0)
+                
+                # Handle picnic baskets
+                if product in ["PICNIC_BASKET1", "PICNIC_BASKET2"] and self.active_products.get(product, False):
+                    # Calculate synthetic value for the basket
                     synthetic_value = self.calculate_synthetic_value(state, product)
-
-                    # Only execute trades if the product is active
-                    if self.active_products.get(product, False):
-                        # Execute basket arbitrage - don't skip for baskets
-                        arbitrage_orders = self.execute_basket_arbitrage(state, product)
-                        if not arbitrage_orders or product not in arbitrage_orders:
-                            orders = self.trade_basket_divergence(
-                                product,
-                                state.order_depths[product],
-                                position,
-                                synthetic_value,
-                            )
-                            if orders:
-                                result[product] = orders
-                        else:
-                            for p, orders in arbitrage_orders.items():
-                                # Only add orders for active products, but skip CROISSANTS and SQUID_INK
-                                # (These are traded only through copy_olivia_trades)
-                                if self.active_products.get(p, False) and p not in ["CROISSANTS", "SQUID_INK"]:
-                                    result.setdefault(p, []).extend(orders)
-
-                elif product in [
-                    "KELP",
-                    "RAINFOREST_RESIN",
-                    "JAMS",
-                    "DJEMBES",
-                ]:  # Removed CROISSANTS and SQUID_INK from this list
-                    # Always perform calculations
-                    if product == "KELP":
-                        self.kelp_prices.append(
-                            self.calculate_fair_value(state.order_depths[product]) or 0
-                        )
-                        if len(self.kelp_prices) > self.timespan:
-                            self.kelp_prices.pop(0)
-                    elif product == "RAINFOREST_RESIN":
-                        self.resin_prices.append(
-                            self.calculate_fair_value(state.order_depths[product]) or 0
-                        )
-                        if len(self.resin_prices) > self.timespan:
-                            self.resin_prices.pop(0)
-
-                    # Only execute trades if the product is active
-                    if self.active_products.get(product, False):
-                        orders = self.product_orders(
-                            product, state.order_depths[product], position
-                        )
-                        if orders:
-                            result[product] = orders
-
-                # Handle vouchers - check separately since they have different names
-                elif product.startswith("VOLCANIC_ROCK_VOUCHER_"):
-                    # Only execute trades if the product is active
-                    if self.active_products.get(product, False):
-                        if position != 0:
-                            orders = self.close_position(
-                                product, state.order_depths[product], position
-                            )
-                            if orders:
-                                result[product] = orders
-
-                elif product in self.active_products and self.active_products[product] and product not in ["CROISSANTS", "SQUID_INK"]:
-                    orders = self.product_orders(
-                        product, state.order_depths[product], position
-                    )
+                    
+                    # Execute basket arbitrage if possible
+                    arb_orders = self.execute_basket_arbitrage(state, product)
+                    if arb_orders:
+                        for p, orders in arb_orders.items():
+                            if p not in result:
+                                result[p] = []
+                            result[p].extend(orders)
+                    
+                    # Add basket divergence trades
+                    div_orders = self.trade_basket_divergence(product, od, pos, synthetic_value)
+                    if div_orders:
+                        if product not in result:
+                            result[product] = []
+                        result[product].extend(div_orders)
+                
+                # Handle basic products (KELP, RESIN, JAMS, DJEMBES)
+                elif product in ["KELP", "RAINFOREST_RESIN", "JAMS", "DJEMBES"] and self.active_products.get(product, False):
+                    orders = self.product_orders(product, od, pos)
                     if orders:
                         result[product] = orders
+                
+                # Close positions for inactive products
+                elif not self.active_products.get(product, True) and pos != 0:
+                    close_orders = self.close_position(product, od, pos)
+                    if close_orders:
+                        result[product] = close_orders
 
-                # For inactive products with positions, close the positions
-                elif position != 0:
-                    orders = self.close_position(
-                        product, state.order_depths[product], position
-                    )
-                    if orders:
-                        result[product] = orders
+            # --- 7) Persist state and flush
+            trader_data: Dict[str, Any] = {
+                "insider_regimes": self.insider_regimes,
+                "insider_last_trades": self.insider_last_trades,
+                "past_volatilities": self.past_volatilities
+            }
+            serialized = jsonpickle.encode(trader_data)
+            logger.flush(state, result, conversions, serialized)
+            return result, conversions, serialized
 
-            # Save insider trading data in trader_data
-            trader_data["insider_regimes"] = self.insider_regimes
-            trader_data["insider_last_trades"] = self.insider_last_trades
-
-            trader_data["past_volatilities"] = self.past_volatilities
-            serialized_trader_data = jsonpickle.encode(trader_data)
-            if len(self.cache) > 1000:
-                self.cache.clear()
-            logger.flush(state, result, conversions, serialized_trader_data)
-            return result, conversions, serialized_trader_data
         except Exception as e:
             logger.print(f"Error in run method: {e}")
             return {}, 0, "{}"
-
-    def _update_regime(self, obs: Observation) -> None:
-        """Compute sunlight regime & emit log on change."""
-        if "MAGNIFICENT_MACARONS" not in obs.conversionObservations:
-            return
-        sun = obs.conversionObservations["MAGNIFICENT_MACARONS"].sunlightIndex
-        prev = getattr(self, "low_sun_regime", False)
-        self.low_sun_regime = sun < self.config["CSI_THRESHOLD"]
-        if self.low_sun_regime != prev:
-            regime = "LOW" if self.low_sun_regime else "NORMAL"
-            logger.print(f"Regime switch → {regime} (CSI {sun:.1f})")
