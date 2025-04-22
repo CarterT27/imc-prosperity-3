@@ -212,7 +212,7 @@ class Trader:
             "DJEMBES": True,
             "PICNIC_BASKET1": True,
             "PICNIC_BASKET2": True,
-            "VOLCANIC_ROCK": True,
+            "VOLCANIC_ROCK": False,
             "VOLCANIC_ROCK_VOUCHER_9500": True,
             "VOLCANIC_ROCK_VOUCHER_9750": True,
             "VOLCANIC_ROCK_VOUCHER_10000": True,
