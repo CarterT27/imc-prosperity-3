@@ -61,6 +61,8 @@ This repository contains research and algorithms for our team, Alpha Animals, in
 <!-- prettier-ignore-end -->
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
+![9th Place Island](9th_place.png)
+
 ## The competition 🏆
 
 
