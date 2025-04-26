@@ -61,6 +61,8 @@ This repository contains research and algorithms for our team, Alpha Animals, in
 <!-- prettier-ignore-end -->
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
+Here is our island, which looks suspiciously like La Jolla, CA—where you’ll find both beautiful beaches and the UC San Diego campus. It’s possible our local expertise in seashell gathering gave us a competitive edge.
+
 ![9th Place Island](9th_place.png)
 
 ## The competition 🏆
