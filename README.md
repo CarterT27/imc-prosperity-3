@@ -3,7 +3,7 @@
 [![All Contributors](https://img.shields.io/badge/all_contributors-3-orange.svg?style=flat-square)](#contributors-)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
-This repository contains research and algorithms for our team, Alpha Animals, in IMC Prosperity 2025. We placed top 10 globally and 2nd in the USA, with an overall score of 1,190,077 seashells. This writeup was heavily inspired by the [linear utility writeup](https://github.com/ericcccsliu/imc-prosperity-2).
+This repository contains research and algorithms for our team, Alpha Animals, in IMC Prosperity 2025. We placed [9th globally and 2nd in the USA](https://jmerle.github.io/imc-prosperity-3-leaderboard/), with an overall score of 1,190,077 seashells. This writeup was heavily inspired by the [linear utility writeup](https://github.com/ericcccsliu/imc-prosperity-2).
 
 ## The team ✨
 
